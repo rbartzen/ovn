@@ -55,7 +55,8 @@ SYSTEM_DPDK_TESTSUITE_AT = \
 SYSTEM_KMOD_TESTSUITE_AT = \
 	tests/system-kmod-macros.at \
 	tests/system-kmod-testsuite.at \
-	tests/system-ovn-kmod.at
+	tests/system-ovn-kmod.at \
+	tests/ovn-system-route-exchange.at
 
 SYSTEM_USERSPACE_TESTSUITE_AT = \
 	tests/system-userspace-testsuite.at \
@@ -290,6 +291,11 @@ tests_ovstest_SOURCES = \
 	lib/test-ovn-features.c \
 	northd/test-ipam.c
 
+if HAVE_NETLINK
+tests_ovstest_SOURCES += \
+	controller/test-route-exchange-netlink.c
+endif
+
 tests_ovstest_LDADD = $(OVS_LIBDIR)/daemon.lo \
     $(OVS_LIBDIR)/libopenvswitch.la lib/libovn.la \
 	controller/binding.$(OBJEXT) \
@@ -306,6 +312,11 @@ tests_ovstest_LDADD = $(OVS_LIBDIR)/daemon.lo \
 	controller/patch.$(OBJEXT) \
 	controller/vif-plug.$(OBJEXT) \
 	northd/ipam.$(OBJEXT)
+
+if HAVE_NETLINK
+tests_ovstest_LDADD += \
+	controller/route-exchange-netlink.$(OBJEXT)
+endif
 
 # Python tests.
 CHECK_PYFILES = \
