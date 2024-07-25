@@ -49,13 +49,18 @@ controller_ovn_controller_SOURCES = \
 	controller/statctrl.h \
 	controller/statctrl.c \
 	controller/ct-zone.h \
-	controller/ct-zone.c
+	controller/ct-zone.c \
+	controller/route-exchange.h
 
 if HAVE_NETLINK
 controller_ovn_controller_SOURCES += \
 	controller/route-exchange-netlink.h \
 	controller/route-exchange-netlink-private.h \
-	controller/route-exchange-netlink.c
+	controller/route-exchange-netlink.c \
+	controller/route-exchange.c
+else
+controller_ovn_controller_SOURCES += \
+	controller/route-exchange-stub.c
 endif
 
 controller_ovn_controller_LDADD = lib/libovn.la $(OVS_LIBDIR)/libopenvswitch.la

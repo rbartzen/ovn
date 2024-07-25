@@ -4371,6 +4371,16 @@ sync_pb_for_lrp(struct ovn_port *op,
         }
     }
 
+    if (is_cr_port(op) || chassis_name) {
+        if (smap_get_bool(&op->nbrp->options, "maintain-vrf", false)) {
+            smap_add(&new, "maintain-vrf", "true");
+        }
+        if (smap_get_bool(&op->od->nbr->options, "dynamic-routing", false)) {
+            smap_add(&new, "dynamic-routing", "true");
+        }
+    }
+
+
     const char *ipv6_pd_list = smap_get(&op->sb->options, "ipv6_ra_pd_list");
     if (ipv6_pd_list) {
         smap_add(&new, "ipv6_ra_pd_list", ipv6_pd_list);
