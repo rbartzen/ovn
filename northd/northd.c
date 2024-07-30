@@ -3137,10 +3137,25 @@ ovn_port_update_sbrec(struct ovsdb_idl_txn *ovnsb_txn,
         sbrec_port_binding_set_parent_port(op->sb, NULL);
         sbrec_port_binding_set_tag(op->sb, NULL, 0);
 
+        const struct lport_addresses *networks;
+        if (op->primary_port) {
+            networks = &op->primary_port->lrp_networks;
+        } else {
+            networks = &op->lrp_networks;
+        }
         struct ds s = DS_EMPTY_INITIALIZER;
-        ds_put_cstr(&s, op->nbrp->mac);
-        for (int i = 0; i < op->nbrp->n_networks; ++i) {
-            ds_put_format(&s, " %s", op->nbrp->networks[i]);
+        ds_put_cstr(&s, networks->ea_s);
+        for (int i = 0; i < networks->n_ipv4_addrs; ++i) {
+            struct ipv4_netaddr addr = networks->ipv4_addrs[i];
+            ds_put_format(&s, " %s/%d", addr.addr_s, addr.plen);
+        }
+        /* We do not need the ipv6 LLA. Since it is last in the list we just
+         * skip it. */
+        if (networks->n_ipv6_addrs > 1) {
+            for (int i = 0; i < networks->n_ipv6_addrs - 1; ++i) {
+                struct ipv6_netaddr addr = networks->ipv6_addrs[i];
+                ds_put_format(&s, " %s/%d", addr.addr_s, addr.plen);
+            }
         }
         const char *addresses = ds_cstr(&s);
         sbrec_port_binding_set_mac(op->sb, &addresses, 1);
