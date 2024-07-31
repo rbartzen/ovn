@@ -666,6 +666,7 @@ struct ovn_port {
     /* Used for active-active port bindings to store the data they where
      * generated from */
     bool is_active_active;
+    char *aa_mac; // Only set on the lrp side
     char *aa_chassis_name;
     size_t aa_chassis_index;
 

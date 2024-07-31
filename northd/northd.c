@@ -1497,6 +1497,18 @@ ovn_port_get_peer(const struct hmap *lr_ports, struct ovn_port *op)
     return ovn_port_find(lr_ports, peer_name);
 }
 
+static const char *
+ovn_port_get_mac(struct ovn_port *op)
+{
+    if (op->is_active_active) {
+        return op->aa_mac;
+    } else if (op->primary_port && op->primary_port->is_active_active) {
+        return op->primary_port->aa_mac;
+    } else {
+        return op->nbrp->mac;
+    }
+}
+
 static void
 ipam_insert_ip_for_datapath(struct ovn_datapath *od, uint32_t ip)
 {
@@ -2626,6 +2638,7 @@ join_logical_ports(const struct sbrec_port_binding_table *sbrec_pb_table,
                 lsp->peer = lrp;
                 lrp->is_active_active = true;
                 lsp->is_active_active = true;
+                lrp->aa_mac = xstrdup(networks.addresses[j].ea_s);
                 lrp->aa_chassis_name = xstrdup(chassis->name);
                 lsp->aa_chassis_name = xstrdup(chassis->name);
                 lrp->aa_chassis_index = j;
@@ -12999,7 +13012,7 @@ build_lrouter_icmp_packet_toobig_admin_flows(
                   " (ip6 && icmp6.type == 2 && icmp6.code == 0)) &&"
                   " eth.dst == %s && !is_chassis_resident(%s) &&"
                   " flags.tunnel_rx == 1",
-                  op->nbrp->mac, op->cr_port->json_key);
+                  ovn_port_get_mac(op), op->cr_port->json_key);
     ds_clear(actions);
     ds_put_format(actions, "outport <-> inport; inport = %s; next;",
                   op->json_key);
@@ -13042,7 +13055,7 @@ build_lswitch_icmp_packet_toobig_admin_flows(
                       "((ip4 && icmp4.type == 3 && icmp4.code == 4) ||"
                       " (ip6 && icmp6.type == 2 && icmp6.code == 0)) && "
                       "eth.src == %s && outport == %s && flags.tunnel_rx == 1",
-                      peer->nbrp->mac, op->json_key);
+                      ovn_port_get_mac(peer), op->json_key);
         ovn_lflow_add(lflows, op->od, S_SWITCH_IN_CHECK_PORT_SEC, 120,
                       ds_cstr(match), "outport <-> inport; next;",
                       op->lflow_ref);
@@ -13051,7 +13064,7 @@ build_lswitch_icmp_packet_toobig_admin_flows(
                       "((ip4 && icmp4.type == 3 && icmp4.code == 4) ||"
                       " (ip6 && icmp6.type == 2 && icmp6.code == 0)) && "
                       "eth.dst == %s && flags.tunnel_rx == 1",
-                      peer->nbrp->mac);
+                      ovn_port_get_mac(peer));
         ds_clear(actions);
         ds_put_format(actions,
                       "outport <-> inport; next(pipeline=ingress,table=%d);",
