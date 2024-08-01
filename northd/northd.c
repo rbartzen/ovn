@@ -308,6 +308,7 @@ BUILD_ASSERT_DECL(ACL_OBS_STAGE_MAX < (1 << 2));
 #define ROUTE_PRIO_OFFSET_MULTIPLIER 3
 #define ROUTE_PRIO_OFFSET_STATIC 1
 #define ROUTE_PRIO_OFFSET_CONNECTED 2
+#define ROUTE_PRIO_OFFSET_SPECIFIC_CHASSIS 512
 
 /* Returns the type of the datapath to which a flow with the given 'stage' may
  * be added. */
@@ -11512,6 +11513,7 @@ struct ecmp_groups_node {
     uint32_t route_table_id;
     uint16_t route_count;
     struct ovs_list route_list; /* Contains ecmp_route_list_node */
+    bool has_different_chassis;
 };
 
 static void
@@ -11528,6 +11530,22 @@ ecmp_groups_add_route(struct ecmp_groups_node *group,
     er->route = route;
     er->id = ++group->route_count;
     ovs_list_insert(&group->route_list, &er->list_node);
+
+    if (!group->has_different_chassis) {
+        struct ecmp_route_list_node *ern;
+        struct sset chassis_names = SSET_INITIALIZER(&chassis_names);
+        LIST_FOR_EACH(ern, list_node, &group->route_list) {
+            if (ern->route->is_discard_route ||
+                !ern->route->out_port->is_active_active) {
+                continue;
+            }
+            sset_add(&chassis_names, ern->route->out_port->aa_chassis_name);
+        }
+        if (sset_count(&chassis_names) > 1) {
+            group->has_different_chassis = true;
+        }
+        sset_destroy(&chassis_names);
+    }
 }
 
 static struct ecmp_groups_node *
@@ -11549,6 +11567,7 @@ ecmp_groups_add(struct hmap *ecmp_groups,
     eg->is_src_route = route->is_src_route;
     eg->origin = smap_get_def(&route->route->options, "origin", "");
     eg->route_table_id = route->route_table_id;
+    eg->has_different_chassis = false;
     ovs_list_init(&eg->route_list);
     ecmp_groups_add_route(eg, route);
 
@@ -11839,7 +11858,81 @@ add_ecmp_symmetric_reply_flows(struct lflow_table *lflows,
 }
 
 static void
+add_route(struct lflow_table *lflows, struct ovn_datapath *od,
+          const struct ovn_port *op, const char *lrp_addr_s,
+          const char *network_s, int plen, const char *gateway,
+          bool is_src_route, const uint32_t rtb_id,
+          const struct sset *bfd_ports,
+          const struct ovsdb_idl_row *stage_hint, bool is_discard_route,
+          int ofs, struct lflow_ref *lflow_ref, const char *port_resident)
+{
+    bool is_ipv4 = strchr(network_s, '.') ? true : false;
+    struct ds match = DS_EMPTY_INITIALIZER;
+    uint16_t priority;
+    const struct ovn_port *op_inport = NULL;
+
+    /* IPv6 link-local addresses must be scoped to the local router port. */
+    if (!is_ipv4) {
+        struct in6_addr network;
+        ovs_assert(ipv6_parse(network_s, &network));
+        if (in6_is_lla(&network)) {
+            op_inport = op;
+        }
+    }
+    build_route_match(op_inport, rtb_id, network_s, plen, is_src_route,
+                      is_ipv4, &match, &priority, ofs);
+
+    if (port_resident) {
+        priority += ROUTE_PRIO_OFFSET_SPECIFIC_CHASSIS;
+        ds_put_format(&match, " && is_chassis_resident(\"%s\")", port_resident);
+    }
+
+    struct ds common_actions = DS_EMPTY_INITIALIZER;
+    struct ds actions = DS_EMPTY_INITIALIZER;
+    if (is_discard_route) {
+        ds_put_cstr(&actions, debug_drop_action());
+    } else {
+        ds_put_format(&common_actions, REG_ECMP_GROUP_ID" = 0; %s = ",
+                      is_ipv4 ? REG_NEXT_HOP_IPV4 : REG_NEXT_HOP_IPV6);
+        if (gateway && gateway[0]) {
+            ds_put_cstr(&common_actions, gateway);
+        } else {
+            ds_put_format(&common_actions, "ip%s.dst", is_ipv4 ? "4" : "6");
+        }
+        ds_put_format(&common_actions, "; "
+                      "%s = %s; "
+                      "eth.src = %s; "
+                      "outport = %s; "
+                      "flags.loopback = 1; "
+                      "next;",
+                      is_ipv4 ? REG_SRC_IPV4 : REG_SRC_IPV6,
+                      lrp_addr_s,
+                      op->lrp_networks.ea_s,
+                      op->json_key);
+        ds_put_format(&actions, "ip.ttl--; %s", ds_cstr(&common_actions));
+    }
+
+    ovn_lflow_add_with_hint(lflows, od, S_ROUTER_IN_IP_ROUTING,
+                            priority, ds_cstr(&match),
+                            ds_cstr(&actions), stage_hint,
+                            lflow_ref);
+    if (op && bfd_is_port_running(bfd_ports, op->key)) {
+        ds_put_format(&match, " && udp.dst == 3784");
+        ovn_lflow_add_with_hint(lflows, op->od,
+                                S_ROUTER_IN_IP_ROUTING,
+                                priority + 1, ds_cstr(&match),
+                                ds_cstr(&common_actions),\
+                                stage_hint, lflow_ref);
+    }
+    ds_destroy(&match);
+    ds_destroy(&common_actions);
+    ds_destroy(&actions);
+}
+
+
+static void
 build_ecmp_route_flow(struct lflow_table *lflows, struct ovn_datapath *od,
+                      const struct sset *bfd_ports,
                       struct ecmp_groups_node *eg, struct lflow_ref *lflow_ref)
 
 {
@@ -11853,7 +11946,6 @@ build_ecmp_route_flow(struct lflow_table *lflows, struct ovn_datapath *od,
         ROUTE_PRIO_OFFSET_CONNECTED: ROUTE_PRIO_OFFSET_STATIC;
     build_route_match(NULL, eg->route_table_id, prefix_s, eg->plen,
                       eg->is_src_route, is_ipv4, &route_match, &priority, ofs);
-    free(prefix_s);
 
     struct ds actions = DS_EMPTY_INITIALIZER;
     ds_put_format(&actions, "ip.ttl--; flags.loopback = 1; %s = %"PRIu16
@@ -11912,77 +12004,20 @@ build_ecmp_route_flow(struct lflow_table *lflows, struct ovn_datapath *od,
         ovn_lflow_add_with_hint(lflows, od, S_ROUTER_IN_IP_ROUTING_ECMP, 100,
                                 ds_cstr(&match), ds_cstr(&actions),
                                 &route->header_, lflow_ref);
+
+        if (eg->has_different_chassis && route_->out_port->cr_port) {
+            add_route(lflows, od, route_->out_port, route_->lrp_addr_s,
+                      prefix_s, route_->plen, route->nexthop, route_->is_src_route,
+                      route_->route_table_id, bfd_ports,
+                      &route->header_,
+                      route_->is_discard_route, ROUTE_PRIO_OFFSET_STATIC,
+                      lflow_ref, route_->out_port->cr_port->key);
+        }
     }
+    free(prefix_s);
     sset_destroy(&visited_ports);
     ds_destroy(&match);
     ds_destroy(&route_match);
-    ds_destroy(&actions);
-}
-
-static void
-add_route(struct lflow_table *lflows, struct ovn_datapath *od,
-          const struct ovn_port *op, const char *lrp_addr_s,
-          const char *network_s, int plen, const char *gateway,
-          bool is_src_route, const uint32_t rtb_id,
-          const struct sset *bfd_ports,
-          const struct ovsdb_idl_row *stage_hint, bool is_discard_route,
-          int ofs, struct lflow_ref *lflow_ref)
-{
-    bool is_ipv4 = strchr(network_s, '.') ? true : false;
-    struct ds match = DS_EMPTY_INITIALIZER;
-    uint16_t priority;
-    const struct ovn_port *op_inport = NULL;
-
-    /* IPv6 link-local addresses must be scoped to the local router port. */
-    if (!is_ipv4) {
-        struct in6_addr network;
-        ovs_assert(ipv6_parse(network_s, &network));
-        if (in6_is_lla(&network)) {
-            op_inport = op;
-        }
-    }
-    build_route_match(op_inport, rtb_id, network_s, plen, is_src_route,
-                      is_ipv4, &match, &priority, ofs);
-
-    struct ds common_actions = DS_EMPTY_INITIALIZER;
-    struct ds actions = DS_EMPTY_INITIALIZER;
-    if (is_discard_route) {
-        ds_put_cstr(&actions, debug_drop_action());
-    } else {
-        ds_put_format(&common_actions, REG_ECMP_GROUP_ID" = 0; %s = ",
-                      is_ipv4 ? REG_NEXT_HOP_IPV4 : REG_NEXT_HOP_IPV6);
-        if (gateway && gateway[0]) {
-            ds_put_cstr(&common_actions, gateway);
-        } else {
-            ds_put_format(&common_actions, "ip%s.dst", is_ipv4 ? "4" : "6");
-        }
-        ds_put_format(&common_actions, "; "
-                      "%s = %s; "
-                      "eth.src = %s; "
-                      "outport = %s; "
-                      "flags.loopback = 1; "
-                      "next;",
-                      is_ipv4 ? REG_SRC_IPV4 : REG_SRC_IPV6,
-                      lrp_addr_s,
-                      op->lrp_networks.ea_s,
-                      op->json_key);
-        ds_put_format(&actions, "ip.ttl--; %s", ds_cstr(&common_actions));
-    }
-
-    ovn_lflow_add_with_hint(lflows, od, S_ROUTER_IN_IP_ROUTING,
-                            priority, ds_cstr(&match),
-                            ds_cstr(&actions), stage_hint,
-                            lflow_ref);
-    if (op && bfd_is_port_running(bfd_ports, op->key)) {
-        ds_put_format(&match, " && udp.dst == 3784");
-        ovn_lflow_add_with_hint(lflows, op->od,
-                                S_ROUTER_IN_IP_ROUTING,
-                                priority + 1, ds_cstr(&match),
-                                ds_cstr(&common_actions),\
-                                stage_hint, lflow_ref);
-    }
-    ds_destroy(&match);
-    ds_destroy(&common_actions);
     ds_destroy(&actions);
 }
 
@@ -12003,7 +12038,7 @@ build_static_route_flow(struct lflow_table *lflows, struct ovn_datapath *od,
               route_->out_port, route_->lrp_addr_s, prefix_s,
               route_->plen, route->nexthop, route_->is_src_route,
               route_->route_table_id, bfd_ports, &route->header_,
-              route_->is_discard_route, ofs, lflow_ref);
+              route_->is_discard_route, ofs, lflow_ref, NULL);
 
     free(prefix_s);
 }
@@ -13763,7 +13798,7 @@ build_ip_routing_flows_for_lrp(struct ovn_port *op,
                   op->lrp_networks.ipv4_addrs[i].network_s,
                   op->lrp_networks.ipv4_addrs[i].plen, NULL, false, 0,
                   bfd_ports, &op->nbrp->header_, false,
-                  ROUTE_PRIO_OFFSET_CONNECTED, lflow_ref);
+                  ROUTE_PRIO_OFFSET_CONNECTED, lflow_ref, NULL);
     }
 
     for (int i = 0; i < op->lrp_networks.n_ipv6_addrs; i++) {
@@ -13771,7 +13806,7 @@ build_ip_routing_flows_for_lrp(struct ovn_port *op,
                   op->lrp_networks.ipv6_addrs[i].network_s,
                   op->lrp_networks.ipv6_addrs[i].plen, NULL, false, 0,
                   bfd_ports, &op->nbrp->header_, false,
-                  ROUTE_PRIO_OFFSET_CONNECTED, lflow_ref);
+                  ROUTE_PRIO_OFFSET_CONNECTED, lflow_ref, NULL);
     }
 }
 
@@ -13822,7 +13857,7 @@ build_static_route_flows_for_lrouter(
     HMAP_FOR_EACH (group, hmap_node, &ecmp_groups) {
         /* add a flow in IP_ROUTING, and one flow for each member in
          * IP_ROUTING_ECMP. */
-        build_ecmp_route_flow(lflows, od, group, lflow_ref);
+        build_ecmp_route_flow(lflows, od, bfd_ports, group, lflow_ref);
     }
     const struct unique_routes_node *ur;
     HMAP_FOR_EACH (ur, hmap_node, &unique_routes) {
@@ -17063,7 +17098,7 @@ build_routable_flows_for_router_port(
                               laddrs->ipv4_addrs[k].plen, NULL, false, 0,
                               bfd_ports, &router_port->nbrp->header_,
                               false, ROUTE_PRIO_OFFSET_CONNECTED,
-                              lrp->stateful_lflow_ref);
+                              lrp->stateful_lflow_ref, NULL);
                 }
             }
         }
