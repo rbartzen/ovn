@@ -11123,10 +11123,12 @@ parsed_routes_add(struct ovn_datapath *od, const struct hmap *lr_ports,
     }
 
     /* Verify that ip_prefix and nexthop are on the same network. */
+    const char *lrp_addr_s = NULL;
+    struct ovn_port *out_port = NULL;
     if (!is_discard_route &&
         !find_static_route_outport(od, lr_ports, route,
                                    IN6_IS_ADDR_V4MAPPED(&prefix),
-                                   NULL, NULL)) {
+                                   &lrp_addr_s, &out_port)) {
         return;
     }
 
@@ -11173,6 +11175,8 @@ parsed_routes_add(struct ovn_datapath *od, const struct hmap *lr_ports,
                                                  "ecmp_symmetric_reply",
                                                  false);
     new_pr->is_discard_route = is_discard_route;
+    new_pr->lrp_addr_s = lrp_addr_s;
+    new_pr->out_port = out_port;
 
     size_t hash = uuid_hash(&od->key);
     struct parsed_route *pr = parsed_route_lookup(routes, hash, new_pr);
@@ -11557,8 +11561,7 @@ add_ecmp_symmetric_reply_flows(struct lflow_table *lflows,
 
 static void
 build_ecmp_route_flow(struct lflow_table *lflows, struct ovn_datapath *od,
-                      const struct hmap *lr_ports, struct ecmp_groups_node *eg,
-                      struct lflow_ref *lflow_ref)
+                      struct ecmp_groups_node *eg, struct lflow_ref *lflow_ref)
 
 {
     bool is_ipv4 = IN6_IS_ADDR_V4MAPPED(&eg->prefix);
@@ -11600,20 +11603,14 @@ build_ecmp_route_flow(struct lflow_table *lflows, struct ovn_datapath *od,
     LIST_FOR_EACH (er, list_node, &eg->route_list) {
         const struct parsed_route *route_ = er->route;
         const struct nbrec_logical_router_static_route *route = route_->route;
-        /* Find the outgoing port. */
-        const char *lrp_addr_s = NULL;
-        struct ovn_port *out_port = NULL;
-        if (!find_static_route_outport(od, lr_ports, route, is_ipv4,
-                                       &lrp_addr_s, &out_port)) {
-            continue;
-        }
         /* Symmetric ECMP reply is only usable on gateway routers.
          * It is NOT usable on distributed routers with a gateway port.
          */
         if (smap_get(&od->nbr->options, "chassis") &&
             route_->ecmp_symmetric_reply && sset_add(&visited_ports,
-                                                     out_port->key)) {
-            add_ecmp_symmetric_reply_flows(lflows, od, lrp_addr_s, out_port,
+                                                     route_->out_port->key)) {
+            add_ecmp_symmetric_reply_flows(lflows, od, route_->lrp_addr_s, 
+                                           route_->out_port,
                                            route_, &route_match,
                                            lflow_ref);
         }
@@ -11630,9 +11627,9 @@ build_ecmp_route_flow(struct lflow_table *lflows, struct ovn_datapath *od,
                       is_ipv4 ? REG_NEXT_HOP_IPV4 : REG_NEXT_HOP_IPV6,
                       route->nexthop,
                       is_ipv4 ? REG_SRC_IPV4 : REG_SRC_IPV6,
-                      lrp_addr_s,
-                      out_port->lrp_networks.ea_s,
-                      out_port->json_key);
+                      route_->lrp_addr_s,
+                      route_->out_port->lrp_networks.ea_s,
+                      route_->out_port->json_key);
         ovn_lflow_add_with_hint(lflows, od, S_ROUTER_IN_IP_ROUTING_ECMP, 100,
                                 ds_cstr(&match), ds_cstr(&actions),
                                 &route->header_, lflow_ref);
@@ -11712,35 +11709,22 @@ add_route(struct lflow_table *lflows, struct ovn_datapath *od,
 
 static void
 build_static_route_flow(struct lflow_table *lflows, struct ovn_datapath *od,
-                        const struct hmap *lr_ports,
                         const struct parsed_route *route_,
                         const struct sset *bfd_ports,
                         struct lflow_ref *lflow_ref)
 {
-    const char *lrp_addr_s = NULL;
-    struct ovn_port *out_port = NULL;
-
     const struct nbrec_logical_router_static_route *route = route_->route;
-
-    /* Find the outgoing port. */
-    if (!route_->is_discard_route) {
-        if (!find_static_route_outport(od, lr_ports, route,
-                                       IN6_IS_ADDR_V4MAPPED(&route_->prefix),
-                                       &lrp_addr_s, &out_port)) {
-            return;
-        }
-    }
 
     int ofs = !strcmp(smap_get_def(&route->options, "origin", ""),
                       ROUTE_ORIGIN_CONNECTED) ? ROUTE_PRIO_OFFSET_CONNECTED
                                               : ROUTE_PRIO_OFFSET_STATIC;
 
     char *prefix_s = build_route_prefix_s(&route_->prefix, route_->plen);
-    add_route(lflows, route_->is_discard_route ? od : out_port->od, out_port,
-              lrp_addr_s, prefix_s, route_->plen, route->nexthop,
-              route_->is_src_route, route_->route_table_id,
-              bfd_ports, &route->header_, route_->is_discard_route,
-              ofs, lflow_ref);
+    add_route(lflows, route_->is_discard_route ? od : route_->out_port->od, 
+              route_->out_port, route_->lrp_addr_s, prefix_s,
+              route_->plen, route->nexthop, route_->is_src_route,
+              route_->route_table_id, bfd_ports, &route->header_,
+              route_->is_discard_route, ofs, lflow_ref);
 
     free(prefix_s);
 }
@@ -13515,7 +13499,7 @@ build_ip_routing_flows_for_lrp(struct ovn_port *op,
 static void
 build_static_route_flows_for_lrouter(
         struct ovn_datapath *od, struct lflow_table *lflows,
-        const struct hmap *lr_ports, struct hmap *parsed_routes,
+        struct hmap *parsed_routes,
         struct simap *route_tables, const struct sset *bfd_ports,
         struct lflow_ref *lflow_ref)
 {
@@ -13559,11 +13543,11 @@ build_static_route_flows_for_lrouter(
     HMAP_FOR_EACH (group, hmap_node, &ecmp_groups) {
         /* add a flow in IP_ROUTING, and one flow for each member in
          * IP_ROUTING_ECMP. */
-        build_ecmp_route_flow(lflows, od, lr_ports, group, lflow_ref);
+        build_ecmp_route_flow(lflows, od, group, lflow_ref);
     }
     const struct unique_routes_node *ur;
     HMAP_FOR_EACH (ur, hmap_node, &unique_routes) {
-        build_static_route_flow(lflows, od, lr_ports, ur->route,
+        build_static_route_flow(lflows, od, ur->route,
                                 bfd_ports, lflow_ref);
     }
     ecmp_groups_destroy(&ecmp_groups);
@@ -17041,7 +17025,7 @@ build_lswitch_and_lrouter_iterate_by_lr(struct ovn_datapath *od,
                                            lsi->meter_groups, NULL);
     build_ND_RA_flows_for_lrouter(od, lsi->lflows, NULL);
     build_ip_routing_pre_flows_for_lrouter(od, lsi->lflows, NULL);
-    build_static_route_flows_for_lrouter(od, lsi->lflows, lsi->lr_ports,
+    build_static_route_flows_for_lrouter(od, lsi->lflows,
                                          lsi->parsed_routes, lsi->route_tables,
                                          lsi->bfd_ports, NULL);
     build_mcast_lookup_flows_for_lrouter(od, lsi->lflows, &lsi->match,

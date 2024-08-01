@@ -707,6 +707,8 @@ struct parsed_route {
     bool is_discard_route;
     const struct nbrec_logical_router *nbr;
     bool stale;
+    const char *lrp_addr_s;
+    struct ovn_port *out_port;
 };
 
 void ovnnb_db_run(struct northd_input *input_data,
