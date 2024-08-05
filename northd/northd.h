@@ -64,6 +64,7 @@ struct northd_input {
     const struct chassis_features *features;
 
     /* Indexes */
+    struct ovsdb_idl_index *nbrec_lrp_by_name;
     struct ovsdb_idl_index *sbrec_chassis_by_name;
     struct ovsdb_idl_index *sbrec_chassis_by_hostname;
     struct ovsdb_idl_index *sbrec_ha_chassis_grp_by_name;
@@ -661,6 +662,12 @@ struct ovn_port {
 
     /* Only used for the router type LSP whose peer is l3dgw_port */
     bool enable_router_port_acl;
+
+    /* Used for active-active port bindings to store the data they where
+     * generated from */
+    bool is_active_active;
+    char *aa_chassis_name;
+    size_t aa_chassis_index;
 
     /* Reference of lflows generated for this ovn_port.
      *

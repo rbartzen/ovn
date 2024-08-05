@@ -14,6 +14,7 @@
 
 #include <config.h>
 
+#include <stdbool.h>
 #include <stdlib.h>
 #include <stdio.h>
 
@@ -30,9 +31,11 @@
 #include "hmapx.h"
 #include "openvswitch/hmap.h"
 #include "openvswitch/json.h"
+#include "openvswitch/shash.h"
 #include "ovn/lex.h"
 #include "lb.h"
 #include "lib/chassis-index.h"
+#include "lib/lrp-index.h"
 #include "lib/ip-mcast-index.h"
 #include "lib/static-mac-binding-index.h"
 #include "lib/copp.h"
@@ -1253,6 +1256,11 @@ ovn_port_cleanup(struct ovn_port *port)
     free(port->ps_addrs);
     port->ps_addrs = NULL;
     port->n_ps_addrs = 0;
+    if (port->is_active_active) {
+        ovs_assert(port->aa_chassis_name);
+        free(port->aa_mac);
+        free(port->aa_chassis_name);
+    }
 
     destroy_lport_addresses(&port->lrp_networks);
     destroy_lport_addresses(&port->proxy_arp_addrs);
@@ -1433,6 +1441,32 @@ lrport_is_enabled(const struct nbrec_logical_router_port *lrport)
 {
     return !lrport->enabled || *lrport->enabled;
 }
+
+static bool
+lrport_is_active_active(const struct nbrec_logical_router_port *lrport)
+{
+    if (!lrport) {
+      return false;
+    }
+    return smap_get_bool(&lrport->options, "active-active-lrp", false);
+}
+
+static const struct nbrec_logical_router_port*
+lsp_get_peer(struct ovsdb_idl_index *nbrec_lrp_by_name,
+                     const struct nbrec_logical_switch_port *nbsp)
+{
+    if (!lsp_is_router(nbsp)) {
+        return NULL;
+    }
+
+    const char *peer_name = smap_get(&nbsp->options, "router-port");
+    if (!peer_name) {
+        return NULL;
+    }
+
+    return lrp_lookup_by_name(nbrec_lrp_by_name, peer_name);
+}
+
 
 static bool
 lsp_force_fdb_lookup(const struct ovn_port *op)
@@ -2295,13 +2329,19 @@ join_logical_ports_lrp(struct hmap *ports,
     return op;
 }
 
+struct active_active_port {
+    const struct nbrec_logical_switch_port *nbsp;
+    const struct nbrec_logical_router_port *nbrp;
+    struct ovn_datapath *switch_dp;
+    struct ovn_datapath *router_dp;
+};
+
 
 static struct ovn_port *
 create_cr_port(struct ovn_port *op, struct hmap *ports,
                struct ovs_list *both_dbs, struct ovs_list *nb_only)
 {
-    char *redirect_name = ovn_chassis_redirect_name(
-        op->nbsp ? op->nbsp->name : op->nbrp->name);
+    char *redirect_name = ovn_chassis_redirect_name(op->key);
 
     struct ovn_port *crp = ovn_port_find(ports, redirect_name);
     if (crp && crp->sb && crp->sb->datapath == op->od->sb) {
@@ -2346,6 +2386,8 @@ peer_needs_cr_port_creation(struct ovn_port *op)
 
 static void
 join_logical_ports(const struct sbrec_port_binding_table *sbrec_pb_table,
+                   struct ovsdb_idl_index *nbrec_lrp_by_name,
+                   struct ovsdb_idl_index *sbrec_chassis_by_name,
                    struct hmap *ls_datapaths, struct hmap *lr_datapaths,
                    struct hmap *ports, unsigned long *queue_id_bitmap,
                    struct hmap *tag_alloc_table, struct ovs_list *sb_only,
@@ -2354,6 +2396,8 @@ join_logical_ports(const struct sbrec_port_binding_table *sbrec_pb_table,
     ovs_list_init(sb_only);
     ovs_list_init(nb_only);
     ovs_list_init(both);
+
+    struct shash active_active_ports = SHASH_INITIALIZER(&active_active_ports);
 
     const struct sbrec_port_binding *sb;
     SBREC_PORT_BINDING_TABLE_FOR_EACH (sb, sbrec_pb_table) {
@@ -2368,6 +2412,17 @@ join_logical_ports(const struct sbrec_port_binding_table *sbrec_pb_table,
         for (size_t i = 0; i < od->nbs->n_ports; i++) {
             const struct nbrec_logical_switch_port *nbsp
                 = od->nbs->ports[i];
+            const struct nbrec_logical_router_port *nbrp
+                = lsp_get_peer(nbrec_lrp_by_name, nbsp);
+            if (lrport_is_active_active(nbrp)) {
+                struct active_active_port *aap = xzalloc(
+                    sizeof(struct active_active_port));
+                aap->nbsp = nbsp;
+                aap->nbrp = nbrp;
+                aap->switch_dp = od;
+                shash_add(&active_active_ports, nbrp->name, aap);
+                continue;
+            }
             join_logical_ports_lsp(ports, nb_only, both, od, nbsp, 
                              nbsp->name, queue_id_bitmap, tag_alloc_table);
         }
@@ -2381,6 +2436,27 @@ join_logical_ports(const struct sbrec_port_binding_table *sbrec_pb_table,
                 = od->nbr->ports[i];
 
             struct lport_addresses lrp_networks;
+
+            if (lrport_is_active_active(nbrp)) {
+                struct ovn_port *op = ovn_port_find_bound(ports, nbrp->name);
+                if (op) {
+                    ovs_list_remove(&op->list);
+                }
+                struct active_active_port *aap = 
+                    shash_find_data(&active_active_ports, nbrp->name);
+                if (!aap) {
+                    static struct vlog_rate_limit rl =
+                        VLOG_RATE_LIMIT_INIT(1, 5);
+                    VLOG_WARN_RL(&rl,
+                        "Could not find lsp peer for active-active lrp '%s'",
+                        nbrp->name);
+                    continue;
+                }
+
+                aap->router_dp = od;
+                continue;
+            }
+
             if (!extract_lrp_networks(nbrp, &lrp_networks)) {
                 static struct vlog_rate_limit rl
                     = VLOG_RATE_LIMIT_INIT(5, 1);
@@ -2465,6 +2541,101 @@ join_logical_ports(const struct sbrec_port_binding_table *sbrec_pb_table,
         }
     }
 
+    // Now we setup the active-active lrp/lsps
+    struct shash_node *aa_snode;
+    SHASH_FOR_EACH (aa_snode, &active_active_ports) {
+        const struct active_active_port *aap = aa_snode->data;
+        const struct nbrec_logical_switch_port *nbsp = aap->nbsp;
+        const struct nbrec_logical_router_port *nbrp = aap->nbrp; 
+        ovs_assert(nbrp);
+        ovs_assert(aap->switch_dp);
+        ovs_assert(aap->router_dp);
+
+        if (aap->switch_dp->n_localnet_ports != 1) {
+            static struct vlog_rate_limit rl
+                = VLOG_RATE_LIMIT_INIT(5, 1);
+            VLOG_WARN_RL(&rl, "active-active lrp '%s' is not connect to a "
+                              "ls with exactly one localnet port", nbrp->name);
+            continue;
+        }
+
+        const struct ovn_port *localnet_port =
+            aap->switch_dp->localnet_ports[0];
+
+        const char *network_name =
+            smap_get(&localnet_port->nbsp->options, "network_name");
+        if (!network_name) {
+            static struct vlog_rate_limit rl
+                = VLOG_RATE_LIMIT_INIT(5, 1);
+            VLOG_WARN_RL(&rl, "active-active lrp '%s' has a localnet port "
+                              "connected with no network_name", nbrp->name);
+            continue;
+        }
+
+        if (!nbrp->ha_chassis_group) {
+            static struct vlog_rate_limit rl
+                = VLOG_RATE_LIMIT_INIT(5, 1);
+            VLOG_WARN_RL(&rl, "missing 'ha_chassis_group' for"
+                " active-active-port %s", nbrp->name);
+            continue;
+        }
+
+        for (size_t i = 0; i < nbrp->ha_chassis_group->n_ha_chassis; i++) {
+            const struct nbrec_ha_chassis *hc
+              = nbrp->ha_chassis_group->ha_chassis[i];
+
+            const struct sbrec_chassis *chassis = chassis_lookup_by_name(
+                sbrec_chassis_by_name, hc->chassis_name);
+            if (!chassis) {
+                static struct vlog_rate_limit rl
+                    = VLOG_RATE_LIMIT_INIT(5, 1);
+                VLOG_WARN_RL(&rl, "'ha_chassis_group' contains not found"
+                    " chassis %s", hc->chassis_name);
+                continue;
+            }
+
+            struct chassis_aa_network networks;
+            if (!chassis_find_aa_networks(chassis, network_name, &networks)) {
+                static struct vlog_rate_limit rl
+                    = VLOG_RATE_LIMIT_INIT(5, 1);
+                VLOG_WARN_RL(&rl, "chassis %s does not contain network"
+                    " but it is in ha_chassis_group", chassis->name);
+                continue;
+            }
+
+            for (size_t j = 0; j < networks.n_addresses; j++) {
+                char *lrp_name = xasprintf("%s-%s-%"PRIuSIZE,
+                                           nbrp->name, chassis->name, j);
+                char *lsp_name = xasprintf("%s-%s-%"PRIuSIZE,
+                                           nbsp->name, chassis->name, j);
+                struct ovn_port* lrp =
+                    join_logical_ports_lrp(ports, nb_only, both, &dgps,
+                                           aap->router_dp, nbrp,
+                                           lrp_name, &networks.addresses[j]);
+                struct ovn_port* lsp =
+                    join_logical_ports_lsp(ports, nb_only, both,
+                                           aap->switch_dp, nbsp,
+                                     lsp_name, queue_id_bitmap,
+                                           tag_alloc_table);
+                free(lrp_name);
+                free(lsp_name);
+                if (!lrp || !lsp) {
+                    continue;
+                }
+                lrp->peer = lsp;
+                lsp->peer = lrp;
+                lrp->is_active_active = true;
+                lsp->is_active_active = true;
+                lrp->aa_chassis_name = xstrdup(chassis->name);
+                lsp->aa_chassis_name = xstrdup(chassis->name);
+                lrp->aa_chassis_index = j;
+                lsp->aa_chassis_index = j;
+            }
+            free(networks.network_name);
+            free(networks.addresses);
+        }
+    }
+
     struct hmapx_node *hmapx_node;
     HMAPX_FOR_EACH (hmapx_node, &dgps) {
         op = hmapx_node->data;
@@ -2522,6 +2693,9 @@ join_logical_ports(const struct sbrec_port_binding_table *sbrec_pb_table,
     HMAP_FOR_EACH (op, key_node, ports) {
         ipam_add_port_addresses(op->od, op);
     }
+
+    shash_destroy(&aa_redirect_targets);
+    shash_destroy_free_data(&active_active_ports);
 }
 
 /* Returns an array of strings, each consisting of a MAC address followed
@@ -2875,6 +3049,51 @@ sync_ha_chassis_group_for_sbpb(
     sbrec_port_binding_set_ha_chassis_group(pb, sb_ha_grp);
 }
 
+static char *
+generate_ha_chassis_group_active_active(
+    struct ovsdb_idl_txn *ovnsb_txn,
+    struct ovsdb_idl_index *sbrec_chassis_by_name,
+    struct ovsdb_idl_index *sbrec_ha_chassis_grp_by_name,
+    const char *chassis_name,
+    const struct sbrec_port_binding *pb)
+{
+    bool new_sb_chassis_group = false;
+    char *chassis_group_name = xasprintf(
+        "active-active-fixed-%s", chassis_name);
+    const struct sbrec_ha_chassis_group *sb_ha_grp =
+        ha_chassis_group_lookup_by_name(
+            sbrec_ha_chassis_grp_by_name, chassis_group_name);
+
+    if (!sb_ha_grp) {
+        sb_ha_grp = sbrec_ha_chassis_group_insert(ovnsb_txn);
+        sbrec_ha_chassis_group_set_name(sb_ha_grp, chassis_group_name);
+        new_sb_chassis_group = true;
+    }
+
+    if (new_sb_chassis_group) {
+        struct sbrec_ha_chassis **sb_ha_chassis = NULL;
+        sb_ha_chassis = xcalloc(1, sizeof *sb_ha_chassis);
+        const struct sbrec_chassis *chassis =
+            chassis_lookup_by_name(sbrec_chassis_by_name, chassis_name);
+        sb_ha_chassis[0] = sbrec_ha_chassis_insert(ovnsb_txn);
+        /* It's perfectly ok if the chassis is NULL. This could
+         * happen when ovn-controller exits and removes its row
+         * from the chassis table in OVN SB DB. */
+        sbrec_ha_chassis_set_chassis(sb_ha_chassis[0], chassis);
+        sbrec_ha_chassis_set_priority(sb_ha_chassis[0], 1);
+        const struct smap external_ids =
+            SMAP_CONST1(&external_ids, "chassis-name",
+                        chassis_name);
+        sbrec_ha_chassis_set_external_ids(sb_ha_chassis[0], &external_ids);
+        sbrec_ha_chassis_group_set_ha_chassis(sb_ha_grp, sb_ha_chassis,
+                                              1);
+        free(sb_ha_chassis);
+    }
+
+    sbrec_port_binding_set_ha_chassis_group(pb, sb_ha_grp);
+    return chassis_group_name;
+}
+
 /* This functions translates the gw chassis on the nb database
  * to HA chassis group in the sb database entries.
  */
@@ -3129,14 +3348,29 @@ ovn_port_update_sbrec(struct ovsdb_idl_txn *ovnsb_txn,
                                  "ignoring the latter.", op->nbrp->name);
                 }
 
-                /* HA Chassis group is set. Ignore 'gateway_chassis'. */
-                sync_ha_chassis_group_for_sbpb(ovnsb_txn,
-                                               sbrec_chassis_by_name,
-                                               sbrec_ha_chassis_grp_by_name,
-                                               op->nbrp->ha_chassis_group,
-                                               op->sb);
-                sset_add(active_ha_chassis_grps,
-                         op->nbrp->ha_chassis_group->name);
+                if (op->primary_port && op->primary_port->is_active_active) {
+
+                    /* Generate new HA Chassis group just bound to one node. */
+                    char* ha_chassis_group =
+                        generate_ha_chassis_group_active_active(ovnsb_txn,
+                                                   sbrec_chassis_by_name,
+                                                   sbrec_ha_chassis_grp_by_name,
+                                                   op->primary_port->aa_chassis_name,
+                                                   op->sb);
+                    sset_add(active_ha_chassis_grps,
+                             ha_chassis_group);
+                    free(ha_chassis_group);
+                } else {
+
+                    /* HA Chassis group is set. Ignore 'gateway_chassis'. */
+                    sync_ha_chassis_group_for_sbpb(ovnsb_txn,
+                                                   sbrec_chassis_by_name,
+                                                   sbrec_ha_chassis_grp_by_name,
+                                                   op->nbrp->ha_chassis_group,
+                                                   op->sb);
+                    sset_add(active_ha_chassis_grps,
+                             op->nbrp->ha_chassis_group->name);
+                }
             } else if (op->nbrp->n_gateway_chassis) {
                 /* Legacy gateway_chassis support.
                  * Create ha_chassis_group for the Northbound gateway_chassis
@@ -4215,6 +4449,7 @@ build_ports(struct ovsdb_idl_txn *ovnsb_txn,
     const struct sbrec_mirror_table *sbrec_mirror_table,
     const struct sbrec_mac_binding_table *sbrec_mac_binding_table,
     const struct sbrec_ha_chassis_group_table *sbrec_ha_chassis_group_table,
+    struct ovsdb_idl_index *nbrec_lrp_by_name,
     struct ovsdb_idl_index *sbrec_chassis_by_name,
     struct ovsdb_idl_index *sbrec_chassis_by_hostname,
     struct ovsdb_idl_index *sbrec_ha_chassis_grp_by_name,
@@ -4235,7 +4470,10 @@ build_ports(struct ovsdb_idl_txn *ovnsb_txn,
     /* Borrow ls_ports for joining NB and SB for both LSPs and LRPs.
      * We will split them later. */
     struct hmap *ports = ls_ports;
-    join_logical_ports(sbrec_port_binding_table, ls_datapaths, lr_datapaths,
+    join_logical_ports(sbrec_port_binding_table, 
+                       nbrec_lrp_by_name,
+                       sbrec_chassis_by_name,
+                       ls_datapaths, lr_datapaths,
                        ports, queue_id_bitmap,
                        &tag_alloc_table, &sb_only, &nb_only, &both);
 
@@ -18877,6 +19115,7 @@ ovnnb_db_run(struct northd_input *input_data,
                 input_data->sbrec_mirror_table,
                 input_data->sbrec_mac_binding_table,
                 input_data->sbrec_ha_chassis_group_table,
+                input_data->nbrec_lrp_by_name,
                 input_data->sbrec_chassis_by_name,
                 input_data->sbrec_chassis_by_hostname,
                 input_data->sbrec_ha_chassis_grp_by_name,

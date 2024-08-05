@@ -19,6 +19,7 @@
 #include <stdio.h>
 
 #include "chassis-index.h"
+#include "lrp-index.h"
 #include "ip-mcast-index.h"
 #include "static-mac-binding-index.h"
 #include "lib/inc-proc-eng.h"
@@ -349,6 +350,8 @@ void inc_proc_northd_init(struct ovsdb_idl_loop *nb,
         .sb_idl = sb->idl,
     };
 
+    struct ovsdb_idl_index *nbrec_lrp_by_name =
+                         lrp_index_create(nb->idl);
     struct ovsdb_idl_index *sbrec_chassis_by_name =
                          chassis_index_create(sb->idl);
     struct ovsdb_idl_index *sbrec_ha_chassis_grp_by_name =
@@ -368,6 +371,9 @@ void inc_proc_northd_init(struct ovsdb_idl_loop *nb,
 
     engine_init(&en_northd_output, &engine_arg);
 
+    engine_ovsdb_node_add_index(&en_nb_logical_router,
+                                "nbrec_lrp_by_name",
+                                nbrec_lrp_by_name);
     engine_ovsdb_node_add_index(&en_sb_chassis,
                                 "sbrec_chassis_by_name",
                                 sbrec_chassis_by_name);

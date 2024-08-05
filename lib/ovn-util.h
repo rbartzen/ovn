@@ -44,6 +44,7 @@ struct ovsrec_flow_sample_collector_set_table;
 struct sbrec_datapath_binding;
 struct sbrec_logical_flow;
 struct sbrec_port_binding;
+struct sbrec_chassis;
 struct smap;
 struct svec;
 struct uuid;
@@ -349,6 +350,16 @@ int64_t daemon_startup_ts(void);
 
 char *lr_lb_address_set_name(uint32_t lr_tunnel_key, int addr_family);
 char *lr_lb_address_set_ref(uint32_t lr_tunnel_key, int addr_family);
+
+struct chassis_aa_network {
+    char* network_name;
+    struct lport_addresses* addresses;
+    size_t n_addresses;
+};
+
+bool chassis_find_aa_networks(const struct sbrec_chassis *,
+                              const char* network_name,
+                              struct chassis_aa_network* chassis_aa_network);
 
 const char *
 get_chassis_external_id_value(const struct smap *,

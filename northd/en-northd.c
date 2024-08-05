@@ -41,6 +41,10 @@ static void
 northd_get_input_data(struct engine_node *node,
                       struct northd_input *input_data)
 {
+    input_data->nbrec_lrp_by_name =
+        engine_ovsdb_node_get_index(
+            engine_get_input("NB_logical_router", node),
+            "nbrec_lrp_by_name");
     input_data->sbrec_chassis_by_name =
         engine_ovsdb_node_get_index(
             engine_get_input("SB_chassis", node),
