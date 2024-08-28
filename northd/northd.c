@@ -2420,27 +2420,6 @@ join_logical_ports(const struct sbrec_port_binding_table *sbrec_pb_table,
     }
 
     struct ovn_datapath *od;
-    HMAP_FOR_EACH (od, key_node, ls_datapaths) {
-        ovs_assert(od->nbs);
-        for (size_t i = 0; i < od->nbs->n_ports; i++) {
-            const struct nbrec_logical_switch_port *nbsp
-                = od->nbs->ports[i];
-            const struct nbrec_logical_router_port *nbrp
-                = lsp_get_peer(nbrec_lrp_by_name, nbsp);
-            if (lrport_is_active_active(nbrp)) {
-                struct active_active_port *aap = xzalloc(
-                    sizeof(struct active_active_port));
-                aap->nbsp = nbsp;
-                aap->nbrp = nbrp;
-                aap->switch_dp = od;
-                shash_add(&active_active_ports, nbrp->name, aap);
-                continue;
-            }
-            join_logical_ports_lsp(ports, nb_only, both, od, nbsp, 
-                             nbsp->name, queue_id_bitmap, tag_alloc_table);
-        }
-    }
-
     struct hmapx dgps = HMAPX_INITIALIZER(&dgps);
     HMAP_FOR_EACH (od, key_node, lr_datapaths) {
         ovs_assert(od->nbr);
@@ -2455,18 +2434,11 @@ join_logical_ports(const struct sbrec_port_binding_table *sbrec_pb_table,
                 if (op) {
                     ovs_list_remove(&op->list);
                 }
-                struct active_active_port *aap = 
-                    shash_find_data(&active_active_ports, nbrp->name);
-                if (!aap) {
-                    static struct vlog_rate_limit rl =
-                        VLOG_RATE_LIMIT_INIT(1, 5);
-                    VLOG_WARN_RL(&rl,
-                        "Could not find lsp peer for active-active lrp '%s'",
-                        nbrp->name);
-                    continue;
-                }
-
+                struct active_active_port *aap = xzalloc(
+                    sizeof(struct active_active_port));
+                aap->nbrp = nbrp;
                 aap->router_dp = od;
+                shash_add(&active_active_ports, nbrp->name, aap);
                 continue;
             }
 
@@ -2479,6 +2451,26 @@ join_logical_ports(const struct sbrec_port_binding_table *sbrec_pb_table,
             join_logical_ports_lrp(ports, nb_only, both, &dgps,
                                    od, nbrp,
                                    nbrp->name, &lrp_networks);
+        }
+    }
+
+    HMAP_FOR_EACH (od, key_node, ls_datapaths) {
+        ovs_assert(od->nbs);
+        for (size_t i = 0; i < od->nbs->n_ports; i++) {
+            const struct nbrec_logical_switch_port *nbsp
+                = od->nbs->ports[i];
+            const struct nbrec_logical_router_port *nbrp
+                = lsp_get_peer(nbrec_lrp_by_name, nbsp);
+            if (lrport_is_active_active(nbrp)) {
+                struct active_active_port *aap = 
+                    shash_find_data(&active_active_ports, nbrp->name);
+                ovs_assert(aap);
+                aap->nbsp = nbsp;
+                aap->switch_dp = od;
+                continue;
+            }
+            join_logical_ports_lsp(ports, nb_only, both, od, nbsp,
+                             nbsp->name, queue_id_bitmap, tag_alloc_table);
         }
     }
 
