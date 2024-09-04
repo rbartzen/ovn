@@ -34,5 +34,6 @@
 #define LR_NAT_RUN_STOPWATCH_NAME "lr_nat_run"
 #define LR_STATEFUL_RUN_STOPWATCH_NAME "lr_stateful"
 #define LS_STATEFUL_RUN_STOPWATCH_NAME "ls_stateful"
+#define ROUTES_SYNC_RUN_STOPWATCH_NAME "routes_sync"
 
 #endif

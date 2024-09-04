@@ -722,7 +722,7 @@ struct parsed_route {
     const struct nbrec_logical_router_static_route *route;
     bool ecmp_symmetric_reply;
     bool is_discard_route;
-    const struct nbrec_logical_router *nbr;
+    const struct ovn_datapath *od;
     bool stale;
     enum route_source source;
     const char *lrp_addr_s;
@@ -752,7 +752,7 @@ void northd_indices_create(struct northd_data *data,
 
 void route_policies_init(struct route_policies_data *);
 void route_policies_destroy(struct route_policies_data *);
-void build_parsed_routes(struct ovn_datapath *, const struct hmap *,
+void build_parsed_routes(const struct ovn_datapath *, const struct hmap *,
                          const struct hmap *, struct hmap *, struct simap *,
                          struct hmap *);
 uint32_t get_route_table_id(struct simap *, const char *);

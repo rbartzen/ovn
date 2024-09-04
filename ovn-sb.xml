@@ -5178,4 +5178,54 @@ tcp.flags = RST;
       The set of variable values for a given chassis.
     </column>
   </table>
+
+  <table name="Route">
+    <p>
+      Each record represents a route thas is export from ovn or imported to ovn
+      using some dynamic routing logic outside of ovn.
+      It is populated by <code>ovn-northd</code> based on the addresses, routes
+      and NAT Entries of a <code>OVN_Northbound.Logical_Router_Port</code>.
+    </p>
+
+    <column name="datapath">
+      The datapath belonging to the
+      <code>OVN_Northbound.Logical_Router</code> that this route is valid
+      for.
+    </column>
+
+    <column name="logical_port">
+      <p>
+        If the type is <code>advertise</code> then this is the logical_port
+        the router will send packets out.
+      </p>
+
+      <p>
+        If the type is <code>receive</code> then this is the logical_port
+        the route was learned on.
+      </p>
+    </column>
+
+    <column name="ip_prefix">
+      <p>
+        IP prefix of this route (e.g. 192.168.100.0/24).
+      </p>
+    </column>
+
+    <column name="type">
+      <p>
+        If the route is to be exported from OVN to the outside network or if
+        it is imported from the outside network.
+      </p>
+      <ul>
+        <li>
+          <code>advertise</code>: This route should be advertised to the
+          outside network.
+       </li>
+        <li>
+          <code>receive</code>: This route has been learned from the outside
+          network.
+        </li>
+      </ul>
+    </column>
+  </table>
 </database>

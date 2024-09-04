@@ -499,4 +499,6 @@ bool extract_addresses_with_port(const char *addresses,
                                  struct lport_addresses *laddrs,
                                  char **lport);
 
+bool prefix_is_link_local(const struct in6_addr *prefix, unsigned int plen);
+
 #endif /* OVN_UTIL_H */

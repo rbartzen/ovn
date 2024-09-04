@@ -11335,7 +11335,8 @@ route_hash(struct parsed_route *route)
 }
 
 static bool
-find_static_route_outport(struct ovn_datapath *od, const struct hmap *lr_ports,
+find_static_route_outport(const struct ovn_datapath *od,
+    const struct hmap *lr_ports,
     const struct nbrec_logical_router_static_route *route, bool is_ipv4,
     const char **p_lrp_addr_s, struct ovn_port **p_out_port);
 
@@ -11404,19 +11405,19 @@ parsed_route_free(struct parsed_route *pr) {
 }
 
 static void
-parsed_route_add(struct ovn_datapath *od,
-                  struct in6_addr *nexthop,
-                  const struct in6_addr prefix,
-                  unsigned int plen,
-                  bool is_discard_route,
-                  const char *lrp_addr_s,
-                  const struct ovn_port *out_port,
-                  const struct nbrec_logical_router_static_route *route,
-                  uint32_t route_table_id,
-                  bool is_src_route,
-                  bool ecmp_symmetric_reply,
-                  enum route_source source,
-                  struct hmap *routes)
+parsed_route_add(const struct ovn_datapath *od,
+                 struct in6_addr *nexthop,
+                 const struct in6_addr prefix,
+                 unsigned int plen,
+                 bool is_discard_route,
+                 const char *lrp_addr_s,
+                 const struct ovn_port *out_port,
+                 const struct nbrec_logical_router_static_route *route,
+                 uint32_t route_table_id,
+                 bool is_src_route,
+                 bool ecmp_symmetric_reply,
+                 enum route_source source,
+                 struct hmap *routes)
 {
 
     struct parsed_route *new_pr = xzalloc(sizeof *new_pr);
@@ -11426,7 +11427,7 @@ parsed_route_add(struct ovn_datapath *od,
     new_pr->route_table_id = route_table_id;
     new_pr->is_src_route = is_src_route;
     new_pr->hash = route_hash(new_pr);
-    new_pr->nbr = od->nbr;
+    new_pr->od = od;
     new_pr->ecmp_symmetric_reply = ecmp_symmetric_reply;
     new_pr->is_discard_route = is_discard_route;
     new_pr->lrp_addr_s = lrp_addr_s;
@@ -11445,7 +11446,8 @@ parsed_route_add(struct ovn_datapath *od,
 }
 
 static void
-parsed_routes_add_static(struct ovn_datapath *od, const struct hmap *lr_ports,
+parsed_routes_add_static(const struct ovn_datapath *od,
+                  const struct hmap *lr_ports,
                   const struct nbrec_logical_router_static_route *route,
                   const struct hmap *bfd_connections,
                   struct hmap *routes, struct simap *route_tables,
@@ -11559,7 +11561,7 @@ parsed_routes_add_static(struct ovn_datapath *od, const struct hmap *lr_ports,
 }
 
 static void
-parsed_routes_add_connected(struct ovn_datapath *od, const struct ovn_port *op,
+parsed_routes_add_connected(const struct ovn_datapath *od, const struct ovn_port *op,
                             struct hmap *routes)
 {
     for (int i = 0; i < op->lrp_networks.n_ipv4_addrs; i++) {
@@ -11588,14 +11590,14 @@ parsed_routes_add_connected(struct ovn_datapath *od, const struct ovn_port *op,
 }
 
 void
-build_parsed_routes(struct ovn_datapath *od, const struct hmap *lr_ports,
-                    const struct hmap *bfd_connections, struct hmap *routes,
-                    struct simap *route_tables,
-                    struct hmap *bfd_active_connections)
+build_parsed_routes(const struct ovn_datapath *od, const struct hmap *lr_ports,
+                     const struct hmap *bfd_connections, struct hmap *routes,
+                     struct simap *route_tables,
+                     struct hmap *bfd_active_connections)
 {
     struct parsed_route *pr;
     HMAP_FOR_EACH (pr, key_node, routes) {
-        if (pr->nbr == od->nbr) {
+        if (pr->od == od) {
             pr->stale = true;
         }
     }
@@ -11821,7 +11823,8 @@ build_route_match(const struct ovn_port *op_inport, uint32_t rtb_id,
 
 /* Output: p_lrp_addr_s and p_out_port. */
 static bool
-find_static_route_outport(struct ovn_datapath *od, const struct hmap *lr_ports,
+find_static_route_outport(const struct ovn_datapath *od,
+    const struct hmap *lr_ports,
     const struct nbrec_logical_router_static_route *route, bool is_ipv4,
     const char **p_lrp_addr_s, struct ovn_port **p_out_port)
 {
