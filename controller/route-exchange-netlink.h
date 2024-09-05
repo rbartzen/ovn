@@ -26,14 +26,15 @@ int re_nl_create_vrf(const char *ifname, uint32_t table_id);
 int re_nl_delete_vrf(const char *ifname);
 
 int re_nl_add_route(uint32_t table_id, struct in6_addr *dst,
-                    const char *ifname);
-int re_nl_delete_route(uint32_t table_id, struct in6_addr *dst);
+                    unsigned int plen, const char *ifname);
+int re_nl_delete_route(uint32_t table_id, struct in6_addr *dst,
+                       unsigned int plen);
 
 void re_nl_dump(uint32_t table_id);
 
-void host_route_insert(struct hmap *host_routes, uint32_t table_id,
-                       struct in6_addr *dst);
-void host_routes_destroy(struct hmap *);
+void route_insert(struct hmap *host_routes, uint32_t table_id,
+                  struct in6_addr *dst, unsigned int plen);
+void routes_destroy(struct hmap *);
 void re_nl_sync_routes(uint32_t table_id, const char *ifname,
                        struct hmap *host_routes);
 

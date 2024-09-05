@@ -52,8 +52,6 @@ route_exchange_run(struct route_exchange_ctx_in *r_ctx_in,
     struct sset old_maintained_vrfs = SSET_INITIALIZER(&old_maintained_vrfs);
     sset_swap(&_maintained_vrfs, &old_maintained_vrfs);
 
-    /* Extract all NAT- and LB VIP-addresses associated with lports resident on
-     * the current chassis to allow full sync of leaked routing tables. */
     const struct local_datapath *ld;
     HMAP_FOR_EACH (ld, hmap_node, r_ctx_in->local_datapaths) {
         if (!ld->n_peer_ports || ld->is_switch) {
@@ -139,7 +137,8 @@ route_exchange_run(struct route_exchange_ctx_in *r_ctx_in,
                 continue;
             }
 
-            host_route_insert(&local_routes, ld->datapath->tunnel_key, &prefix);
+            route_insert(&local_routes, ld->datapath->tunnel_key, &prefix, plen);
+            printf("will try to add route %s %d for datapath %ld\n", route->ip_prefix, plen, ld->datapath->tunnel_key);
         }
         sbrec_route_index_destroy_row(route_filter);
 
@@ -151,7 +150,7 @@ route_exchange_run(struct route_exchange_ctx_in *r_ctx_in,
                           &local_routes);
 
 out:
-        host_routes_destroy(&local_routes);
+        routes_destroy(&local_routes);
     }
 
     /* Remove VRFs previously maintained by us not found in the above loop. */

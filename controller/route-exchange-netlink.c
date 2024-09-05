@@ -104,7 +104,7 @@ re_nl_delete_vrf(const char *ifname)
 
 static int
 modify_route(uint32_t type, uint32_t flags_arg, uint32_t table_id,
-             struct in6_addr *dst, uint32_t oif)
+             struct in6_addr *dst, unsigned int plen, uint32_t oif)
 {
     uint32_t flags = NLM_F_REQUEST | NLM_F_ACK;
     bool is_ipv4 = IN6_IS_ADDR_V4MAPPED(dst);
@@ -126,7 +126,7 @@ modify_route(uint32_t type, uint32_t flags_arg, uint32_t table_id,
         rt->rtm_scope = RT_SCOPE_UNIVERSE;
         rt->rtm_type = RTN_UNICAST;
     }
-    rt->rtm_dst_len = is_ipv4 ? 32 : 128;
+    rt->rtm_dst_len = plen;
 
     nl_msg_put_u32(&request, RTA_TABLE, table_id);
 
@@ -147,7 +147,8 @@ modify_route(uint32_t type, uint32_t flags_arg, uint32_t table_id,
 }
 
 int
-re_nl_add_route(uint32_t table_id, struct in6_addr *dst, const char *ifname)
+re_nl_add_route(uint32_t table_id, struct in6_addr *dst, unsigned int plen,
+                const char *ifname)
 {
     uint32_t flags = NLM_F_CREATE | NLM_F_EXCL;
     uint32_t type = RTM_NEWROUTE;
@@ -159,11 +160,11 @@ re_nl_add_route(uint32_t table_id, struct in6_addr *dst, const char *ifname)
         return EINVAL;
     }
 
-    return modify_route(type, flags, table_id, dst, if_nametoindex(ifname));
+    return modify_route(type, flags, table_id, dst, plen, if_nametoindex(ifname));
 }
 
 int
-re_nl_delete_route(uint32_t table_id, struct in6_addr *dst)
+re_nl_delete_route(uint32_t table_id, struct in6_addr *dst, unsigned int plen)
 {
     if (!TABLE_ID_VALID(table_id)) {
         VLOG_WARN_RL(&rl,
@@ -172,35 +173,39 @@ re_nl_delete_route(uint32_t table_id, struct in6_addr *dst)
         return EINVAL;
     }
 
-    return modify_route(RTM_DELROUTE, 0, table_id, dst, 0);
+    return modify_route(RTM_DELROUTE, 0, table_id, dst, plen, 0);
 }
 
-struct host_route_node {
+struct route_node {
     struct hmap_node hmap_node;
     uint32_t table_id;
     struct in6_addr addr;
+    unsigned int plen;
 };
 
 static uint32_t
-host_route_hash(const struct in6_addr *dst)
+route_hash(const struct in6_addr *dst, unsigned int plen)
 {
-    return hash_bytes(dst->s6_addr, 16, 0);
+    uint32_t hash = hash_bytes(dst->s6_addr, 16, 0);
+    return hash_int(plen, hash);
 }
 
 void
-host_route_insert(struct hmap *host_routes, uint32_t table_id,
-                  struct in6_addr *dst)
+route_insert(struct hmap *host_routes, uint32_t table_id,
+                  struct in6_addr *dst, unsigned int plen)
 {
-    struct host_route_node *hr = xzalloc(sizeof *hr);
-    hmap_insert(host_routes, &hr->hmap_node, host_route_hash(dst));
+    struct route_node *hr = xzalloc(sizeof *hr);
+    hmap_insert(host_routes, &hr->hmap_node,
+                route_hash(dst, plen));
     hr->table_id = table_id;
     hr->addr = *dst;
+    hr->plen = plen;
 }
 
 void
-host_routes_destroy(struct hmap *host_routes)
+routes_destroy(struct hmap *host_routes)
 {
-    struct host_route_node *hr;
+    struct route_node *hr;
     HMAP_FOR_EACH_SAFE (hr, hmap_node, host_routes) {
         hmap_remove(host_routes, &hr->hmap_node);
         free(hr);
@@ -209,56 +214,62 @@ host_routes_destroy(struct hmap *host_routes)
 }
 
 static void
-handle_route_msg_delete_host_routes(struct route_table_msg *msg, void *data)
+handle_route_msg_delete_routes(struct route_table_msg *msg, void *data)
 {
     struct route_data *rd = &msg->rd;
     struct hmap *host_routes = data;
-    struct host_route_node *hr;
+    struct route_node *hr;
     int err;
 
-    uint32_t hash = host_route_hash(&rd->rta_dst);
+    uint32_t hash = route_hash(&rd->rta_dst, rd->plen);
     HMAP_FOR_EACH_WITH_HASH (hr, hmap_node, hash, host_routes) {
-        if (ipv6_addr_equals(&hr->addr, &rd->rta_dst)) {
+        if (ipv6_addr_equals(&hr->addr, &rd->rta_dst)
+                && hr->plen == rd->plen) {
             hmap_remove(host_routes, &hr->hmap_node);
             free(hr);
             return;
         }
     }
-    err = re_nl_delete_route(rd->rta_table_id, &rd->rta_dst);
+    err = re_nl_delete_route(rd->rta_table_id, &rd->rta_dst,
+                             rd->plen);
     if (err) {
         char addr_s[INET6_ADDRSTRLEN + 1];
-        VLOG_WARN_RL(&rl, "Delete route table_id=%"PRIu32" dst=%s: %s",
+        VLOG_WARN_RL(&rl, "Delete route table_id=%"PRIu32" dst=%s plen=%d: %s",
                      rd->rta_table_id,
                      ipv6_string_mapped(
                          addr_s, &rd->rta_dst) ? addr_s : "(invalid)",
+                     rd->plen,
                      ovs_strerror(err));
     }
 }
 
 void
 re_nl_sync_routes(uint32_t table_id, const char *ifname,
-                  struct hmap *host_routes)
+                  struct hmap *routes)
 {
     /* Remove routes from the system that are not in the host_routes hmap and
      * remove entries from host_routes hmap that match routes already installed
      * in the system. */
-    route_table_dump_one_table(table_id, handle_route_msg_delete_host_routes,
-                               host_routes);
+    route_table_dump_one_table(table_id, handle_route_msg_delete_routes,
+                               routes);
 
     /* Add any remaining routes in the host_routes hmap to the system routing
      * table. */
-    struct host_route_node *hr;
-    HMAP_FOR_EACH_SAFE (hr, hmap_node, host_routes) {
-        int err = re_nl_add_route(table_id, &hr->addr, ifname);
+    struct route_node *hr;
+    HMAP_FOR_EACH_SAFE (hr, hmap_node, routes) {
+        int err = re_nl_add_route(table_id, &hr->addr, hr->plen, ifname);
         if (err) {
             char addr_s[INET6_ADDRSTRLEN + 1];
-            VLOG_WARN_RL(&rl, "Add route table_id=%"PRIu32" dst=%s dev=%s: %s",
-                         table_id, ifname,
+            VLOG_WARN_RL(&rl, "Add route table_id=%"PRIu32" dst=%s plen=%d "
+                              "dev=%s: %s",
+                         table_id,
                          ipv6_string_mapped(
                              addr_s, &hr->addr) ? addr_s : "(invalid)",
+                         hr->plen,
+                         ifname,
                          ovs_strerror(err));
         }
-        hmap_remove(host_routes, &hr->hmap_node);
+        hmap_remove(routes, &hr->hmap_node);
         free(hr);
     }
 }
