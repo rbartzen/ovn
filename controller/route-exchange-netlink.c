@@ -214,13 +214,19 @@ routes_destroy(struct hmap *host_routes)
     hmap_destroy(host_routes);
 }
 
+struct route_msg_handle_data {
+    struct hmap *routes;
+    const char *netns;
+};
+
 static void
 handle_route_msg_delete_routes(struct route_table_msg *msg, void *data)
 {
     struct route_data *rd = &msg->rd;
-    struct hmap *host_routes = data;
+    struct route_msg_handle_data *handle_data = data;
+    struct hmap *routes = handle_data->routes;
     struct route_node *hr;
-    //int err;
+    int err;
 
     // This route is not from us, we should not touch it.
     if (rd->rtm_protocol != RTPROT_OVN) {
@@ -228,16 +234,17 @@ handle_route_msg_delete_routes(struct route_table_msg *msg, void *data)
     }
 
     uint32_t hash = route_hash(&rd->rta_dst, rd->plen);
-    HMAP_FOR_EACH_WITH_HASH (hr, hmap_node, hash, host_routes) {
+    HMAP_FOR_EACH_WITH_HASH (hr, hmap_node, hash, routes) {
         if (ipv6_addr_equals(&hr->addr, &rd->rta_dst)
                 && hr->plen == rd->plen) {
-            hmap_remove(host_routes, &hr->hmap_node);
+            hmap_remove(routes, &hr->hmap_node);
             free(hr);
             return;
         }
     }
     printf("i should do stuff now, like delete routes\n");
-    /*err = re_nl_delete_route(rd->rta_table_id, &rd->rta_dst,
+    err = re_nl_delete_route(handle_data->netns,
+                             rd->rta_table_id, &rd->rta_dst,
                              rd->plen);
     if (err) {
         char addr_s[INET6_ADDRSTRLEN + 1];
@@ -247,7 +254,7 @@ handle_route_msg_delete_routes(struct route_table_msg *msg, void *data)
                          addr_s, &rd->rta_dst) ? addr_s : "(invalid)",
                      rd->plen,
                      ovs_strerror(err));
-    }*/
+    }
 }
 
 void
@@ -265,8 +272,12 @@ re_nl_sync_routes(uint32_t table_id,
     /* Remove routes from the system that are not in the host_routes hmap and
      * remove entries from host_routes hmap that match routes already installed
      * in the system. */
+    struct route_msg_handle_data data = {
+        .routes = routes,
+        .netns = netns,
+    };
     route_table_dump_one_table(netns, table_id, handle_route_msg_delete_routes,
-                               routes);
+                               &data);
 
     /* Add any remaining routes in the host_routes hmap to the system routing
      * table. */
