@@ -4375,6 +4375,9 @@ sync_pb_for_lrp(struct ovn_port *op,
         if (smap_get_bool(&op->nbrp->options, "maintain-vrf", false)) {
             smap_add(&new, "maintain-vrf", "true");
         }
+        if (smap_get_bool(&op->nbrp->options, "use-netns", false)) {
+            smap_add(&new, "use-netns", "true");
+        }
         if (smap_get_bool(&op->od->nbr->options, "dynamic-routing", false)) {
             smap_add(&new, "dynamic-routing", "true");
         }

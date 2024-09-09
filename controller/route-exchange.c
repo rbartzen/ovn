@@ -59,6 +59,7 @@ route_exchange_run(struct route_exchange_ctx_in *r_ctx_in,
         }
 
         bool maintain_vrf = false;
+        bool use_netns = false;
         bool relevant_datapath = false;
         struct hmap local_routes
             = HMAP_INITIALIZER(&local_routes);
@@ -86,6 +87,8 @@ route_exchange_run(struct route_exchange_ctx_in *r_ctx_in,
 
             maintain_vrf |= smap_get_bool(&sb_crp->options,
                                           "maintain-vrf", false);
+            use_netns |= smap_get_bool(&sb_crp->options,
+                                       "use-netns", false);
             relevant_datapath = true;
         }
 
@@ -108,6 +111,13 @@ route_exchange_run(struct route_exchange_ctx_in *r_ctx_in,
         char vrf_name[IFNAMSIZ + 1];
         snprintf(vrf_name, sizeof vrf_name, "ovnvrf%"PRIi64,
                  ld->datapath->tunnel_key);
+
+        if (maintain_vrf && use_netns) {
+            VLOG_WARN_RL(&rl,
+                         "For VRF %s both maintain-vrf and use-netns are set, "
+                         "this will never work", vrf_name);
+            goto out;
+        }
 
         if (maintain_vrf) {
             int error = re_nl_create_vrf(vrf_name, ld->datapath->tunnel_key);
@@ -146,8 +156,8 @@ route_exchange_run(struct route_exchange_ctx_in *r_ctx_in,
             tracked_datapath_add(ld->datapath, TRACKED_RESOURCE_NEW,
                                  r_ctx_out->tracked_re_datapaths);
         }
-        re_nl_sync_routes(ld->datapath->tunnel_key, vrf_name,
-                          &local_routes);
+        re_nl_sync_routes(ld->datapath->tunnel_key,
+                          &local_routes, use_netns);
 
 out:
         routes_destroy(&local_routes);
