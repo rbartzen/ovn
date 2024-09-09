@@ -179,7 +179,6 @@ re_nl_delete_route(const char * netns, uint32_t table_id, struct in6_addr *dst, 
 
 struct route_node {
     struct hmap_node hmap_node;
-    uint32_t table_id;
     struct in6_addr addr;
     unsigned int plen;
 };
@@ -192,13 +191,12 @@ route_hash(const struct in6_addr *dst, unsigned int plen)
 }
 
 void
-route_insert(struct hmap *host_routes, uint32_t table_id,
-                  struct in6_addr *dst, unsigned int plen)
+route_insert(struct hmap *host_routes,
+             struct in6_addr *dst, unsigned int plen)
 {
     struct route_node *hr = xzalloc(sizeof *hr);
     hmap_insert(host_routes, &hr->hmap_node,
                 route_hash(dst, plen));
-    hr->table_id = table_id;
     hr->addr = *dst;
     hr->plen = plen;
 }

@@ -147,7 +147,7 @@ route_exchange_run(struct route_exchange_ctx_in *r_ctx_in,
                 continue;
             }
 
-            route_insert(&local_routes, ld->datapath->tunnel_key, &prefix, plen);
+            route_insert(&local_routes, &prefix, plen);
             printf("will try to add route %s %d for datapath %ld\n", route->ip_prefix, plen, ld->datapath->tunnel_key);
         }
         sbrec_route_index_destroy_row(route_filter);

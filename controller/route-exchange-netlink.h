@@ -33,7 +33,7 @@ int re_nl_delete_route(const char *netns, uint32_t table_id, struct in6_addr *ds
 
 void re_nl_dump(uint32_t table_id);
 
-void route_insert(struct hmap *host_routes, uint32_t table_id,
+void route_insert(struct hmap *host_routes,
                   struct in6_addr *dst, unsigned int plen);
 void routes_destroy(struct hmap *);
 void re_nl_sync_routes(uint32_t table_id,

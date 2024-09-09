@@ -35,11 +35,11 @@ test_re_nl_sync_routes(struct ovs_cmdl_context *ctx OVS_UNUSED)
     int err;
 
     ipv6_parse("2001:db8:42::100", &dst6);
-    route_insert(&host_routes, TABLE_ID, &dst6, 128);
+    route_insert(&host_routes, &dst6, 128);
 
     ip_parse("172.16.42.100", &ip);
     in6_addr_set_mapped_ipv4(&dst4, ip);
-    route_insert(&host_routes, TABLE_ID, &dst4, 32);
+    route_insert(&host_routes, &dst4, 32);
 
     err = re_nl_create_vrf(VRF_IFNAME, TABLE_ID);
     ovs_assert(err == 0);
