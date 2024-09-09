@@ -43,6 +43,8 @@ static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(5, 20);
                                   table_id != RT_TABLE_LOCAL &&               \
                                   table_id != RT_TABLE_MAX)
 
+#define RTPROT_OVN 84
+
 static int
 modify_vrf(uint32_t type, uint32_t flags_arg,
            const char *ifname, uint32_t table_id)
@@ -121,7 +123,7 @@ modify_route(const char *netns, uint32_t type, uint32_t flags_arg, uint32_t tabl
     if (type == RTM_DELROUTE) {
         rt->rtm_scope = RT_SCOPE_NOWHERE;
     } else {
-        rt->rtm_protocol = RTPROT_BOOT;
+        rt->rtm_protocol = RTPROT_OVN;
         rt->rtm_scope = RT_SCOPE_UNIVERSE;
         //rt->rtm_type = RTN_UNICAST;
         rt->rtm_type = RTN_BLACKHOLE;
@@ -219,6 +221,11 @@ handle_route_msg_delete_routes(struct route_table_msg *msg, void *data)
     struct hmap *host_routes = data;
     struct route_node *hr;
     //int err;
+
+    // This route is not from us, we should not touch it.
+    if (rd->rtm_protocol != RTPROT_OVN) {
+        return;
+    }
 
     uint32_t hash = route_hash(&rd->rta_dst, rd->plen);
     HMAP_FOR_EACH_WITH_HASH (hr, hmap_node, hash, host_routes) {

@@ -31,6 +31,7 @@
  *
  * - Add rta_table_id.
  * - Add plen.
+ * - Add rtm_protocol
  *
  * route_table_parse():
  *
@@ -71,6 +72,7 @@ struct route_data {
     uint32_t mark;
     uint32_t rta_table_id; /* 0 if missing. */
     unsigned char plen;
+    unsigned char rtm_protocol;
 };
 
 /* A digested version of a route message sent down by the kernel to indicate
@@ -778,6 +780,7 @@ route_table_parse(struct ofpbuf *buf, struct route_table_msg *change)
         change->nlmsg_type     = nlmsg->nlmsg_type;
         change->rd.rtm_dst_len = rtm->rtm_dst_len + (ipv4 ? 96 : 0);
         change->rd.plen = rtm->rtm_dst_len;
+        change->rd.rtm_protocol = rtm->rtm_protocol;
         change->rd.local = rtm->rtm_type == RTN_LOCAL;
         if (attrs[RTA_OIF]) {
             rta_oif = nl_attr_get_u32(attrs[RTA_OIF]);
