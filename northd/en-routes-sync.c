@@ -165,6 +165,12 @@ routes_table_sync(struct ovsdb_idl_txn *ovnsb_txn,
         if (!smap_get_bool(&route->od->nbr->options, "dynamic-routing", false)) {
             continue;
         }
+        if (route->source == ROUTE_SOURCE_CONNECTED && !smap_get_bool(&route->out_port->nbrp->options, "dynamic-routing-connected", false)) {
+            continue;
+        }
+        if (route->source == ROUTE_SOURCE_STATIC && !smap_get_bool(&route->out_port->nbrp->options, "dynamic-routing-static", false)) {
+            continue;
+        }
         route_e = route_lookup_or_add(&sync_routes,
                                       route->od->sb,
                                       route->out_port->key,
