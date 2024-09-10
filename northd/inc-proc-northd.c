@@ -270,6 +270,7 @@ void inc_proc_northd_init(struct ovsdb_idl_loop *nb,
 
     engine_add_input(&en_routes_sync, &en_routes, NULL);
     engine_add_input(&en_routes_sync, &en_sb_route, NULL);
+    engine_add_input(&en_routes_sync, &en_northd, NULL);
 
     engine_add_input(&en_sync_meters, &en_nb_acl, NULL);
     engine_add_input(&en_sync_meters, &en_nb_meter, NULL);

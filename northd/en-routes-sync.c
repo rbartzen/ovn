@@ -30,33 +30,64 @@ VLOG_DEFINE_THIS_MODULE(en_routes_sync);
 static void
 routes_table_sync(struct ovsdb_idl_txn *ovnsb_txn,
                   const struct sbrec_route_table *sbrec_route_table,
-                  const struct hmap *parsed_routes);
+                  const struct hmap *parsed_routes,
+                  const struct hmap *lr_ports,
+                  const struct ovn_datapaths *lr_datapaths,
+                  struct hmap *parsed_routes_out);
+
+static void
+routes_sync_init(struct routes_sync_data *data)
+{
+    hmap_init(&data->parsed_routes);
+}
+
+static void
+routes_sync_destroy(struct routes_sync_data *data)
+{
+    struct parsed_route *r;
+    HMAP_FOR_EACH_POP (r, key_node, &data->parsed_routes) {
+        parsed_route_free(r);
+    }
+    hmap_destroy(&data->parsed_routes);
+}
 
 void
 *en_routes_sync_init(struct engine_node *node OVS_UNUSED,
                      struct engine_arg *arg OVS_UNUSED)
 {
-    return NULL;
+    struct routes_sync_data *data = xzalloc(sizeof *data);
+    routes_sync_init(data);
+    return data;
 }
 
 void
-en_routes_sync_cleanup(void *data_ OVS_UNUSED)
+en_routes_sync_cleanup(void *data)
 {
+    routes_sync_destroy(data);
+    free(data);
 }
 
 void
-en_routes_sync_run(struct engine_node *node, void *data_ OVS_UNUSED)
+en_routes_sync_run(struct engine_node *node, void *data)
 {
+    routes_sync_destroy(data);
+    routes_sync_init(data);
+
+    struct routes_sync_data *routes_sync_data = data;
     struct routes_data *routes_data
         = engine_get_input_data("routes", node);
     const struct engine_context *eng_ctx = engine_get_context();
     const struct sbrec_route_table *sbrec_route_table =
         EN_OVSDB_GET(engine_get_input("SB_route", node));
+    struct northd_data *northd_data = engine_get_input_data("northd", node);
 
     stopwatch_start(ROUTES_SYNC_RUN_STOPWATCH_NAME, time_msec());
 
     routes_table_sync(eng_ctx->ovnsb_idl_txn, sbrec_route_table,
-                      &routes_data->parsed_routes);
+                      &routes_data->parsed_routes,
+                      &northd_data->lr_ports,
+                      &northd_data->lr_datapaths,
+                      &routes_sync_data->parsed_routes);
 
     stopwatch_stop(ROUTES_SYNC_RUN_STOPWATCH_NAME, time_msec());
     engine_set_node_state(node, EN_UPDATED);
@@ -131,9 +162,95 @@ route_erase_entry(struct route_entry *route_e)
 }
 
 static void
+parse_route_from_sbrec_route(struct hmap *parsed_routes_out,
+                             const struct hmap *lr_ports,
+                             const struct hmap *lr_datapaths,
+                             const struct sbrec_route *route)
+{
+    /* TODO: this is mostly stolen from parsed_route_add_static, we should
+     * refactor this so that we do not need to duplicate it all. */
+
+    const struct ovn_datapath *od = ovn_datapath_from_sbrec(
+        NULL, lr_datapaths, route->datapath);
+
+    /* Verify that the next hop is an IP address with an all-ones mask. */
+    struct in6_addr *nexthop = xmalloc(sizeof(*nexthop));
+    unsigned int plen;
+    if (!ip46_parse_cidr(route->nexthop, nexthop, &plen)) {
+        static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(5, 1);
+        VLOG_WARN_RL(&rl, "bad 'nexthop' %s in learned route "
+                     UUID_FMT, route->nexthop,
+                     UUID_ARGS(&route->header_.uuid));
+        free(nexthop);
+        return;
+    }
+    if ((IN6_IS_ADDR_V4MAPPED(nexthop) && plen != 32) ||
+        (!IN6_IS_ADDR_V4MAPPED(nexthop) && plen != 128)) {
+        static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(5, 1);
+        VLOG_WARN_RL(&rl, "bad next hop mask %s in learned route "
+                     UUID_FMT, route->nexthop,
+                     UUID_ARGS(&route->header_.uuid));
+        free(nexthop);
+        return;
+    }
+
+    /* Parse ip_prefix */
+    struct in6_addr prefix;
+    if (!ip46_parse_cidr(route->ip_prefix, &prefix, &plen)) {
+        static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(5, 1);
+        VLOG_WARN_RL(&rl, "bad 'ip_prefix' %s in learned route "
+                     UUID_FMT, route->ip_prefix,
+                     UUID_ARGS(&route->header_.uuid));
+        free(nexthop);
+        return;
+    }
+
+    /* Verify that ip_prefix and nexthop have same address familiy. */
+    if (IN6_IS_ADDR_V4MAPPED(&prefix) != IN6_IS_ADDR_V4MAPPED(nexthop)) {
+        static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(5, 1);
+        VLOG_WARN_RL(&rl, "Address family doesn't match between 'ip_prefix'"
+                     " %s and 'nexthop' %s in learned route "UUID_FMT,
+                     route->ip_prefix, route->nexthop,
+                     UUID_ARGS(&route->header_.uuid));
+        free(nexthop);
+        return;
+    }
+
+    /* Verify that ip_prefix and nexthop are on the same network. */
+    const char *lrp_addr_s = NULL;
+    struct ovn_port *out_port = NULL;
+    if (!find_route_outport(lr_ports, route->logical_port,
+                            route->ip_prefix, route->nexthop,
+                            IN6_IS_ADDR_V4MAPPED(&prefix),
+                            &out_port, &lrp_addr_s)) {
+        free(nexthop);
+        return;
+    }
+
+    parsed_route_add(
+        od,
+        nexthop,
+        prefix,
+        plen,
+        false,
+        lrp_addr_s,
+        out_port,
+        0,
+        false,
+        false,
+        ROUTE_SOURCE_LEARNED,
+        &route->header_,
+        parsed_routes_out
+        );
+}
+
+static void
 routes_table_sync(struct ovsdb_idl_txn *ovnsb_txn,
                   const struct sbrec_route_table *sbrec_route_table,
-                  const struct hmap *parsed_routes)
+                  const struct hmap *parsed_routes,
+                  const struct hmap *lr_ports,
+                  const struct ovn_datapaths *lr_datapaths,
+                  struct hmap *parsed_routes_out)
 {
     if (!ovnsb_txn) {
         return;
@@ -153,9 +270,16 @@ routes_table_sync(struct ovsdb_idl_txn *ovnsb_txn,
                                     sb_route->type);
         route_e->stale = true;
         route_e->sb_route = sb_route;
+
+        if (!strcmp(route_e->type, "receive")) {
+            parse_route_from_sbrec_route(parsed_routes_out, lr_ports,
+                                         &lr_datapaths->datapaths,
+                                         sb_route);
+        }
     }
 
     HMAP_FOR_EACH(route, key_node, parsed_routes) {
+        hmap_insert(parsed_routes_out, &parsed_route_clone(route)->key_node, parsed_route_hash(route));
         if (route->is_discard_route) {
             continue;
         }

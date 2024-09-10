@@ -4702,6 +4702,15 @@ en_route_exchange_cleanup(void *data)
     tracked_datapaths_destroy(&re_data->tracked_re_datapaths);
 }
 
+static void
+en_route_exchange_clear_tracked_data(void *data)
+{
+    struct ed_type_route_exchange *re_data = data;
+
+    tracked_datapaths_destroy(&re_data->tracked_re_datapaths);
+    hmap_init(&re_data->tracked_re_datapaths);
+}
+
 static bool
 route_exchange_runtime_data_handler(struct engine_node *node, void *data)
 {
@@ -5085,7 +5094,7 @@ main(int argc, char *argv[])
     ENGINE_NODE(if_status_mgr, "if_status_mgr");
     ENGINE_NODE_WITH_CLEAR_TRACK_DATA(lb_data, "lb_data");
     ENGINE_NODE(mac_cache, "mac_cache");
-    ENGINE_NODE(route_exchange, "route_exchange");
+    ENGINE_NODE_WITH_CLEAR_TRACK_DATA(route_exchange, "route_exchange");
 
 #define SB_NODE(NAME, NAME_STR) ENGINE_NODE_SB(NAME, NAME_STR);
     SB_NODES

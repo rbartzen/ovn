@@ -18,10 +18,6 @@
 
 #include "lib/inc-proc-eng.h"
 
-/*struct routes_sync_data {
-    struct sset routes;
-};*/
-
 void *en_routes_sync_init(struct engine_node *, struct engine_arg *);
 void en_routes_sync_cleanup(void *data);
 void en_routes_sync_run(struct engine_node *, void *data);
