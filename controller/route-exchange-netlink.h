@@ -22,10 +22,17 @@
 #include "openvswitch/hmap.h"
 #include <netinet/in.h>
 
-struct route_node {
+struct advertise_route_node {
     struct hmap_node hmap_node;
     struct in6_addr addr;
     unsigned int plen;
+};
+
+struct receive_route_node {
+    struct hmap_node hmap_node;
+    struct in6_addr addr;
+    unsigned int plen;
+    struct in6_addr nexthop;
 };
 
 int re_nl_create_vrf(const char *ifname, uint32_t table_id);

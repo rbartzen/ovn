@@ -5211,6 +5211,17 @@ tcp.flags = RST;
       </p>
     </column>
 
+    <column name="nexthop">
+      <p>
+        If the type is <code>advertise</code> then this is empty.
+      </p>
+
+      <p>
+        If the type is <code>receive</code> then this is the nexthop ip we
+        from the outside.
+      </p>
+    </column>
+
     <column name="type">
       <p>
         If the route is to be exported from OVN to the outside network or if

@@ -189,7 +189,7 @@ void
 route_insert(struct hmap *routes,
              struct in6_addr *dst, unsigned int plen)
 {
-    struct route_node *hr = xzalloc(sizeof *hr);
+    struct advertise_route_node *hr = xzalloc(sizeof *hr);
     hmap_insert(routes, &hr->hmap_node,
                 route_hash(dst, plen));
     hr->addr = *dst;
@@ -199,7 +199,7 @@ route_insert(struct hmap *routes,
 void
 routes_destroy(struct hmap *host_routes)
 {
-    struct route_node *hr;
+    struct advertise_route_node *hr;
     HMAP_FOR_EACH_SAFE (hr, hmap_node, host_routes) {
         hmap_remove(host_routes, &hr->hmap_node);
         free(hr);
@@ -219,7 +219,7 @@ handle_route_msg_delete_routes(struct route_table_msg *msg, void *data)
     struct route_data *rd = &msg->rd;
     struct route_msg_handle_data *handle_data = data;
     struct hmap *routes = handle_data->routes;
-    struct route_node *hr;
+    struct advertise_route_node *ar;
     int err;
 
     /* This route is not from us, so we learn it. */
@@ -227,16 +227,26 @@ handle_route_msg_delete_routes(struct route_table_msg *msg, void *data)
         if (prefix_is_link_local(&rd->rta_dst, rd->plen)) {
             return;
         }
-        route_insert(handle_data->learned_routes, &rd->rta_dst, rd->plen);
+        if (IN6_IS_ADDR_UNSPECIFIED(&rd->rta_gw)) {
+            /* This is most likely an address on the local link.
+             * Since we just want to learn remote routes we do not need it. */
+            return;
+        }
+        struct receive_route_node *rr = xzalloc(sizeof *rr);
+        hmap_insert(handle_data->learned_routes, &rr->hmap_node,
+                    route_hash(&rd->rta_dst, rd->plen));
+        rr->addr = rd->rta_dst;
+        rr->plen = rd->plen;
+        rr->nexthop = rd->rta_gw;
         return;
     }
 
     uint32_t hash = route_hash(&rd->rta_dst, rd->plen);
-    HMAP_FOR_EACH_WITH_HASH (hr, hmap_node, hash, routes) {
-        if (ipv6_addr_equals(&hr->addr, &rd->rta_dst)
-                && hr->plen == rd->plen) {
-            hmap_remove(routes, &hr->hmap_node);
-            free(hr);
+    HMAP_FOR_EACH_WITH_HASH (ar, hmap_node, hash, routes) {
+        if (ipv6_addr_equals(&ar->addr, &rd->rta_dst)
+                && ar->plen == rd->plen) {
+            hmap_remove(routes, &ar->hmap_node);
+            free(ar);
             return;
         }
     }
@@ -280,7 +290,7 @@ re_nl_sync_routes(uint32_t table_id,
 
     /* Add any remaining routes in the host_routes hmap to the system routing
      * table. */
-    struct route_node *hr;
+    struct advertise_route_node *hr;
     HMAP_FOR_EACH_SAFE (hr, hmap_node, routes) {
         int err = re_nl_add_route(netns, table_id, &hr->addr, hr->plen);
         if (err) {

@@ -40,24 +40,140 @@ static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(5, 20);
 
 static struct sset _maintained_vrfs = SSET_INITIALIZER(&_maintained_vrfs);
 
-static const struct sbrec_route *
-route_lookup(struct ovsdb_idl_index *sbrec_route_by_datapath_ip_prefix,
-             const struct sbrec_datapath_binding *dp, const char *ip_prefix) {
-    struct sbrec_route *route =
-            sbrec_route_index_init_row(sbrec_route_by_datapath_ip_prefix);
-    sbrec_route_index_set_datapath(route, dp);
-    sbrec_route_index_set_ip_prefix(route, ip_prefix);
+struct route_entry {
+    struct hmap_node hmap_node;
 
-    const struct sbrec_route *retval =
-            sbrec_route_index_find(sbrec_route_by_datapath_ip_prefix, route);
+    const struct sbrec_route *sb_route;
 
-    sbrec_route_index_destroy_row(route);
+    const struct sbrec_datapath_binding *sb_db;
+    char *logical_port;
+    char *ip_prefix;
+    char *nexthop;
+    bool stale;
+};
 
-    return retval;
+static struct route_entry *
+route_alloc_entry(struct hmap *routes,
+                  const struct sbrec_datapath_binding *sb_db,
+                  const char *logical_port,
+                  const char *ip_prefix, const char *nexthop)
+{
+    struct route_entry *route_e = xzalloc(sizeof *route_e);
+
+    route_e->sb_db = sb_db;
+    route_e->logical_port = xstrdup(logical_port);
+    route_e->ip_prefix = xstrdup(ip_prefix);
+    route_e->nexthop = xstrdup(nexthop);
+    route_e->stale = false;
+    uint32_t hash = uuid_hash(&sb_db->header_.uuid);
+    hash = hash_string(logical_port, hash);
+    hash = hash_string(ip_prefix, hash);
+    hmap_insert(routes, &route_e->hmap_node, hash);
+
+    return route_e;
+}
+
+static struct route_entry *
+route_lookup_or_add(struct hmap *route_map,
+                    const struct sbrec_datapath_binding *sb_db,
+                    const char *logical_port, const char *ip_prefix,
+                    const char *nexthop)
+{
+    struct route_entry *route_e;
+    uint32_t hash;
+
+    hash = uuid_hash(&sb_db->header_.uuid);
+    hash = hash_string(logical_port, hash);
+    hash = hash_string(ip_prefix, hash);
+    HMAP_FOR_EACH_WITH_HASH (route_e, hmap_node, hash, route_map) {
+        if (!strcmp(route_e->nexthop, nexthop)) {
+            return route_e;
+        }
+    }
+
+    route_e = route_alloc_entry(route_map, sb_db,
+                                 logical_port, ip_prefix, nexthop);
+    return route_e;
+}
+
+static void
+route_erase_entry(struct route_entry *route_e)
+{
+    free(route_e->logical_port);
+    free(route_e->ip_prefix);
+    free(route_e->nexthop);
+    free(route_e);
+}
+
+static void
+sb_sync_learned_routes(const struct sbrec_datapath_binding *datapath,
+                       const struct hmap *learned_routes,
+                       const struct sset *bound_ports,
+                       struct ovsdb_idl_txn *ovnsb_idl_txn,
+                       struct ovsdb_idl_index *sbrec_route_by_datapath)
+{
+    struct hmap sync_routes = HMAP_INITIALIZER(&sync_routes);
+    struct route_entry *route_e;
+    const struct sbrec_route *sb_route;
+
+    struct sbrec_route *filter =
+            sbrec_route_index_init_row(sbrec_route_by_datapath);
+    sbrec_route_index_set_datapath(filter, datapath);
+    SBREC_ROUTE_FOR_EACH_EQUAL(sb_route, filter, sbrec_route_by_datapath) {
+        if (strcmp(sb_route->type, "receive")) {
+            continue;
+        }
+        /* If the port is not local we don't care about it, someone else will */
+        if (!sset_contains(bound_ports, sb_route->logical_port)) {
+            continue;
+        }
+        route_e = route_alloc_entry(&sync_routes,
+                                    sb_route->datapath,
+                                    sb_route->logical_port,
+                                    sb_route->ip_prefix,
+                                    sb_route->nexthop);
+        route_e->stale = true;
+        route_e->sb_route = sb_route;
+    }
+    sbrec_route_index_destroy_row(filter);
+
+    struct receive_route_node *learned_route;
+    HMAP_FOR_EACH(learned_route, hmap_node, learned_routes) {
+        char *ip_prefix = normalize_v46_prefix(&learned_route->addr, learned_route->plen);
+        char *nexthop = normalize_v46(&learned_route->nexthop);
+
+        const char *logical_port;
+        SSET_FOR_EACH(logical_port, bound_ports) {
+            route_e = route_lookup_or_add(&sync_routes,
+                datapath,
+                logical_port, ip_prefix, nexthop);
+            route_e->stale = false;
+            if (!route_e->sb_route) {
+                sb_route = sbrec_route_insert(ovnsb_idl_txn);
+                sbrec_route_set_datapath(sb_route, datapath);
+                sbrec_route_set_logical_port(sb_route, logical_port);
+                sbrec_route_set_ip_prefix(sb_route, ip_prefix);
+                sbrec_route_set_nexthop(sb_route, nexthop);
+                sbrec_route_set_type(sb_route, "receive");
+                route_e->sb_route = sb_route;
+            }
+        }
+        free(ip_prefix);
+        free(nexthop);
+    }
+
+    HMAP_FOR_EACH_POP (route_e, hmap_node, &sync_routes) {
+        if (route_e->stale) {
+            sbrec_route_delete(route_e->sb_route);
+        }
+        route_erase_entry(route_e);
+    }
+    hmap_destroy(&sync_routes);
 }
 
 bool
-route_exchange_relevant_port(const struct sbrec_port_binding *pb) {
+route_exchange_relevant_port(const struct sbrec_port_binding *pb)
+{
     return (pb && smap_get_bool(&pb->options, "dynamic-routing", false));
 }
 
@@ -81,6 +197,7 @@ route_exchange_run(struct route_exchange_ctx_in *r_ctx_in,
             = HMAP_INITIALIZER(&local_routes);
         struct hmap learned_routes
             = HMAP_INITIALIZER(&learned_routes);
+        struct sset bound_ports = SSET_INITIALIZER(&bound_ports);
 
         /* This is a LR datapath, find LRPs with route exchange options
          * that are bound locally. */
@@ -108,6 +225,7 @@ route_exchange_run(struct route_exchange_ctx_in *r_ctx_in,
             use_netns |= smap_get_bool(&sb_crp->options,
                                        "use-netns", false);
             relevant_datapath = true;
+            sset_add(&bound_ports, local_peer->logical_port);
         }
 
         if (!relevant_datapath) {
@@ -150,12 +268,14 @@ route_exchange_run(struct route_exchange_ctx_in *r_ctx_in,
             sset_add(&_maintained_vrfs, vrf_name);
         }
 
-
         struct sbrec_route *route_filter = sbrec_route_index_init_row(
-            r_ctx_in->sbrec_route_by_datapath_ip_prefix);
+            r_ctx_in->sbrec_route_by_datapath);
         sbrec_route_index_set_datapath(route_filter, ld->datapath);
         struct sbrec_route *route;
         SBREC_ROUTE_FOR_EACH_EQUAL(route, route_filter, r_ctx_in->sbrec_route_by_datapath) {
+            if (!strcmp(route->type, "receive")) {
+                continue;
+            }
             struct in6_addr prefix;
             unsigned int plen;
             if (!ip46_parse_cidr(route->ip_prefix, &prefix, &plen)) {
@@ -176,23 +296,14 @@ route_exchange_run(struct route_exchange_ctx_in *r_ctx_in,
         re_nl_sync_routes(ld->datapath->tunnel_key,
                           &local_routes, &learned_routes, use_netns);
 
-        struct route_node *learned_route;
-        HMAP_FOR_EACH(learned_route, hmap_node, &learned_routes) {
-            char * ip_prefix = normalize_v46_prefix(&learned_route->addr, learned_route->plen);
-            const struct sbrec_route *sb_route = route_lookup(r_ctx_in->sbrec_route_by_datapath_ip_prefix, ld->datapath, ip_prefix);
-            if (!sb_route) {
-                sb_route = sbrec_route_insert(r_ctx_in->ovnsb_idl_txn);
-                sbrec_route_set_datapath(sb_route, ld->datapath);
-                sbrec_route_set_ip_prefix(sb_route, ip_prefix);
-                sbrec_route_set_type(sb_route, "receive");
-                printf("i am advertising, but it does not work. help me\n");
-            }
-            free(ip_prefix);
-        }
+        sb_sync_learned_routes(ld->datapath, &learned_routes, &bound_ports,
+                               r_ctx_in->ovnsb_idl_txn,
+                               r_ctx_in->sbrec_route_by_datapath);
 
 out:
         routes_destroy(&local_routes);
         routes_destroy(&learned_routes);
+        sset_destroy(&bound_ports);
     }
 
     /* Remove VRFs previously maintained by us not found in the above loop. */

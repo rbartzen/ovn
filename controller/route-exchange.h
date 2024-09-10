@@ -35,7 +35,6 @@ struct route_exchange_ctx_in {
     struct hmap *local_lbs;
     const struct sset *local_lports;
     struct ovsdb_idl_index *sbrec_route_by_datapath;
-    struct ovsdb_idl_index *sbrec_route_by_datapath_ip_prefix;
 };
 
 struct route_exchange_ctx_out {
