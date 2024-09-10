@@ -19,9 +19,14 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include "openvswitch/hmap.h"
+#include <netinet/in.h>
 
-struct in6_addr;
-struct hmap;
+struct route_node {
+    struct hmap_node hmap_node;
+    struct in6_addr addr;
+    unsigned int plen;
+};
 
 int re_nl_create_vrf(const char *ifname, uint32_t table_id);
 int re_nl_delete_vrf(const char *ifname);
@@ -33,10 +38,11 @@ int re_nl_delete_route(const char *netns, uint32_t table_id, struct in6_addr *ds
 
 void re_nl_dump(uint32_t table_id);
 
-void route_insert(struct hmap *host_routes,
+void route_insert(struct hmap *routes,
                   struct in6_addr *dst, unsigned int plen);
 void routes_destroy(struct hmap *);
 void re_nl_sync_routes(uint32_t table_id,
-                       struct hmap *host_routes, bool use_netns);
+                       struct hmap *host_routes, struct hmap *learned_routes,
+                       bool use_netns);
 
 #endif /* route-exchange-netlink.h */

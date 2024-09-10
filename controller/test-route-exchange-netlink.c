@@ -30,6 +30,7 @@ static void
 test_re_nl_sync_routes(struct ovs_cmdl_context *ctx OVS_UNUSED)
 {
     struct hmap host_routes = HMAP_INITIALIZER(&host_routes);
+    struct hmap learned_routes = HMAP_INITIALIZER(&learned_routes);
     struct in6_addr dst4, dst6;
     ovs_be32 ip;
     int err;
@@ -45,7 +46,7 @@ test_re_nl_sync_routes(struct ovs_cmdl_context *ctx OVS_UNUSED)
     ovs_assert(err == 0);
     err = re_nl_create_vrf(VRF_IFNAME, TABLE_ID);
     ovs_assert(err == EEXIST);
-    re_nl_sync_routes(TABLE_ID, &host_routes, false);
+    re_nl_sync_routes(TABLE_ID, &host_routes, &learned_routes, false);
     routes_destroy(&host_routes);
 
     err = re_nl_add_route(NULL, TABLE_ID, &dst6, 128);
@@ -54,7 +55,7 @@ test_re_nl_sync_routes(struct ovs_cmdl_context *ctx OVS_UNUSED)
     ovs_assert(err == EEXIST);
 
     hmap_init(&host_routes);
-    re_nl_sync_routes(TABLE_ID, &host_routes, false);
+    re_nl_sync_routes(TABLE_ID, &host_routes, &learned_routes, false);
     routes_destroy(&host_routes);
 
     err = re_nl_add_route(NULL, TABLE_ID, &dst6, 128);

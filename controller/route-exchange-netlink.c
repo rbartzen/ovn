@@ -27,6 +27,7 @@
 #include "openvswitch/ofpbuf.h"
 #include "openvswitch/vlog.h"
 #include "packets.h"
+#include "ovn-util.h"
 
 #include "route-exchange-netlink.h"
 
@@ -177,12 +178,6 @@ re_nl_delete_route(const char * netns, uint32_t table_id, struct in6_addr *dst, 
     return modify_route(netns, RTM_DELROUTE, 0, table_id, dst, plen, 0);
 }
 
-struct route_node {
-    struct hmap_node hmap_node;
-    struct in6_addr addr;
-    unsigned int plen;
-};
-
 static uint32_t
 route_hash(const struct in6_addr *dst, unsigned int plen)
 {
@@ -191,11 +186,11 @@ route_hash(const struct in6_addr *dst, unsigned int plen)
 }
 
 void
-route_insert(struct hmap *host_routes,
+route_insert(struct hmap *routes,
              struct in6_addr *dst, unsigned int plen)
 {
     struct route_node *hr = xzalloc(sizeof *hr);
-    hmap_insert(host_routes, &hr->hmap_node,
+    hmap_insert(routes, &hr->hmap_node,
                 route_hash(dst, plen));
     hr->addr = *dst;
     hr->plen = plen;
@@ -214,6 +209,7 @@ routes_destroy(struct hmap *host_routes)
 
 struct route_msg_handle_data {
     struct hmap *routes;
+    struct hmap *learned_routes;
     const char *netns;
 };
 
@@ -226,8 +222,12 @@ handle_route_msg_delete_routes(struct route_table_msg *msg, void *data)
     struct route_node *hr;
     int err;
 
-    // This route is not from us, we should not touch it.
+    /* This route is not from us, so we learn it. */
     if (rd->rtm_protocol != RTPROT_OVN) {
+        if (prefix_is_link_local(&rd->rta_dst, rd->plen)) {
+            return;
+        }
+        route_insert(handle_data->learned_routes, &rd->rta_dst, rd->plen);
         return;
     }
 
@@ -240,7 +240,6 @@ handle_route_msg_delete_routes(struct route_table_msg *msg, void *data)
             return;
         }
     }
-    printf("i should do stuff now, like delete routes\n");
     err = re_nl_delete_route(handle_data->netns,
                              rd->rta_table_id, &rd->rta_dst,
                              rd->plen);
@@ -257,7 +256,8 @@ handle_route_msg_delete_routes(struct route_table_msg *msg, void *data)
 
 void
 re_nl_sync_routes(uint32_t table_id,
-                  struct hmap *routes, bool use_netns)
+                  struct hmap *routes, struct hmap *learned_routes,
+                  bool use_netns)
 {
 
     char * netns = NULL;
@@ -272,6 +272,7 @@ re_nl_sync_routes(uint32_t table_id,
      * in the system. */
     struct route_msg_handle_data data = {
         .routes = routes,
+        .learned_routes = learned_routes,
         .netns = netns,
     };
     route_table_dump_one_table(netns, table_id, handle_route_msg_delete_routes,

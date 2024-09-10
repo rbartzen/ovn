@@ -4659,8 +4659,13 @@ en_route_exchange_run(struct engine_node *node, void *data)
     struct ovsdb_idl_index *sbrec_route_by_datapath =
         engine_ovsdb_node_get_index(
             engine_get_input("SB_route", node), "datapath");
+    struct ovsdb_idl_index *sbrec_route_by_datapath_ip_prefix =
+        engine_ovsdb_node_get_index(
+            engine_get_input("SB_route", node),
+            "datapath_ip_prefix");
 
     struct route_exchange_ctx_in r_ctx_in = {
+        .ovnsb_idl_txn = engine_get_context()->ovnsb_idl_txn,
         .sbrec_port_binding_by_name = sbrec_port_binding_by_name,
         .lb_table = lb_table,
         .chassis_rec = chassis,
@@ -4669,6 +4674,7 @@ en_route_exchange_run(struct engine_node *node, void *data)
         .local_lbs = &lb_data->local_lbs,
         .local_lports = &rt_data->local_lports,
         .sbrec_route_by_datapath = sbrec_route_by_datapath,
+        .sbrec_route_by_datapath_ip_prefix = sbrec_route_by_datapath_ip_prefix,
     };
 
     struct route_exchange_ctx_out r_ctx_out = {
@@ -5003,6 +5009,10 @@ main(int argc, char *argv[])
     struct ovsdb_idl_index *sbrec_route_index_by_datapath
         = ovsdb_idl_index_create1(ovnsb_idl_loop.idl,
                                   &sbrec_route_col_datapath);
+    struct ovsdb_idl_index *sbrec_route_index_by_datapath_ip_prefix
+        = ovsdb_idl_index_create2(ovnsb_idl_loop.idl,
+                                  &sbrec_route_col_datapath,
+                                  &sbrec_route_col_ip_prefix);
 
     ovsdb_idl_track_add_all(ovnsb_idl_loop.idl);
     ovsdb_idl_omit_alert(ovnsb_idl_loop.idl,
@@ -5328,6 +5338,8 @@ main(int argc, char *argv[])
                                 sbrec_chassis_template_var_index_by_chassis);
     engine_ovsdb_node_add_index(&en_sb_route, "datapath",
                                 sbrec_route_index_by_datapath);
+    engine_ovsdb_node_add_index(&en_sb_route, "datapath_ip_prefix",
+                                sbrec_route_index_by_datapath_ip_prefix);
     engine_ovsdb_node_add_index(&en_ovs_flow_sample_collector_set, "id",
                                 ovsrec_flow_sample_collector_set_by_id);
     engine_ovsdb_node_add_index(&en_ovs_port, "qos", ovsrec_port_by_qos);

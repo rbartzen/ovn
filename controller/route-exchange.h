@@ -26,6 +26,7 @@ struct sbrec_port_binding;
 struct sset;
 
 struct route_exchange_ctx_in {
+    struct ovsdb_idl_txn *ovnsb_idl_txn;
     struct ovsdb_idl_index *sbrec_port_binding_by_name;
     const struct sbrec_load_balancer_table *lb_table;
     const struct sbrec_chassis *chassis_rec;
@@ -34,6 +35,7 @@ struct route_exchange_ctx_in {
     struct hmap *local_lbs;
     const struct sset *local_lports;
     struct ovsdb_idl_index *sbrec_route_by_datapath;
+    struct ovsdb_idl_index *sbrec_route_by_datapath_ip_prefix;
 };
 
 struct route_exchange_ctx_out {
