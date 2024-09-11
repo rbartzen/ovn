@@ -21,6 +21,7 @@
 #include "northd.h"
 
 #include "en-routes-sync.h"
+#include "en-lr-stateful.h"
 #include "lib/stopwatch-names.h"
 #include "openvswitch/hmap.h"
 #include "ovn-util.h"
@@ -30,6 +31,7 @@ VLOG_DEFINE_THIS_MODULE(en_routes_sync);
 static void
 routes_table_sync(struct ovsdb_idl_txn *ovnsb_txn,
                   const struct sbrec_route_table *sbrec_route_table,
+                  const struct lr_stateful_table *lr_stateful_table,
                   const struct hmap *parsed_routes,
                   const struct hmap *lr_ports,
                   const struct ovn_datapaths *lr_datapaths,
@@ -80,10 +82,13 @@ en_routes_sync_run(struct engine_node *node, void *data)
     const struct sbrec_route_table *sbrec_route_table =
         EN_OVSDB_GET(engine_get_input("SB_route", node));
     struct northd_data *northd_data = engine_get_input_data("northd", node);
+    struct ed_type_lr_stateful *lr_stateful_data =
+        engine_get_input_data("lr_stateful", node);
 
     stopwatch_start(ROUTES_SYNC_RUN_STOPWATCH_NAME, time_msec());
 
     routes_table_sync(eng_ctx->ovnsb_idl_txn, sbrec_route_table,
+                      &lr_stateful_data->table,
                       &routes_data->parsed_routes,
                       &northd_data->lr_ports,
                       &northd_data->lr_datapaths,
@@ -108,7 +113,7 @@ struct route_entry {
 static struct route_entry *
 route_alloc_entry(struct hmap *routes,
                   const struct sbrec_datapath_binding *sb_db,
-                  char *logical_port, char *ip_prefix, char *route_type)
+                  char *logical_port, const char *ip_prefix, char *route_type)
 {
     struct route_entry *route_e = xzalloc(sizeof *route_e);
 
@@ -128,27 +133,48 @@ route_alloc_entry(struct hmap *routes,
 static struct route_entry *
 route_lookup_or_add(struct hmap *route_map,
                     const struct sbrec_datapath_binding *sb_db,
-                    char *logical_port, const struct in6_addr *prefix,
-                    unsigned int plen, char *route_type)
+                    char *logical_port, const char *ip_prefix,
+                    char *route_type)
 {
     struct route_entry *route_e;
     uint32_t hash;
-
-    char *ip_prefix = normalize_v46_prefix(prefix, plen);
 
     hash = uuid_hash(&sb_db->header_.uuid);
     hash = hash_string(logical_port, hash);
     hash = hash_string(ip_prefix, hash);
     HMAP_FOR_EACH_WITH_HASH (route_e, hmap_node, hash, route_map) {
         if (!strcmp(route_e->type, route_type)) {
-            free(ip_prefix);
             return route_e;
         }
     }
 
     route_e =  route_alloc_entry(route_map, sb_db,
                                  logical_port, ip_prefix, route_type);
-    free(ip_prefix);
+    return route_e;
+}
+
+static struct route_entry *
+route_sync_to_sb(struct ovsdb_idl_txn *ovnsb_txn, struct hmap *route_map,
+                 const struct sbrec_datapath_binding *sb_db,
+                 char *logical_port, const char *ip_prefix,
+                 char *route_type)
+{
+    struct route_entry *route_e = route_lookup_or_add(route_map,
+                                                      sb_db,
+                                                      logical_port,
+                                                      ip_prefix,
+                                                      route_type);
+    route_e->stale = false;
+
+    if (!route_e->sb_route) {
+        const struct sbrec_route *sr = sbrec_route_insert(ovnsb_txn);
+        sbrec_route_set_datapath(sr, route_e->sb_db);
+        sbrec_route_set_logical_port(sr, route_e->logical_port);
+        sbrec_route_set_ip_prefix(sr, route_e->ip_prefix);
+        sbrec_route_set_type(sr, route_e->type);
+        route_e->sb_route = sr;
+    }
+
     return route_e;
 }
 
@@ -245,8 +271,72 @@ parse_route_from_sbrec_route(struct hmap *parsed_routes_out,
 }
 
 static void
+publish_lport_addresses(struct ovsdb_idl_txn *ovnsb_txn,
+                        struct hmap *route_map,
+                        const struct sbrec_datapath_binding *sb_db,
+                        char *logical_port,
+                        struct lport_addresses *addresses)
+{
+    for (int i = 0; i < addresses->n_ipv4_addrs; i++) {
+        const struct ipv4_netaddr *addr = &addresses->ipv4_addrs[i];
+        char *addr_s = xasprintf("%s/32", addr->addr_s);
+        route_sync_to_sb(ovnsb_txn, route_map,
+                         sb_db,
+                         logical_port,
+                         addr_s,
+                         "advertise");
+        free(addr_s);
+    }
+    for (int i = 0; i < addresses->n_ipv6_addrs; i++) {
+        if (in6_is_lla(&addresses->ipv6_addrs[i].network)) {
+            continue;
+        }
+        const struct ipv6_netaddr *addr = &addresses->ipv6_addrs[i];
+        char *addr_s = xasprintf("%s/128", addr->addr_s);
+        route_sync_to_sb(ovnsb_txn, route_map,
+                         sb_db,
+                         logical_port,
+                         addr_s,
+                         "advertise");
+        free(addr_s);
+    }
+}
+
+
+static void
+publish_host_routes(struct ovsdb_idl_txn *ovnsb_txn,
+                    struct hmap *route_map,
+                    const struct lr_stateful_table *lr_stateful_table,
+                    const struct parsed_route *route)
+{
+    struct ovn_port *port;
+    HMAP_FOR_EACH(port, dp_node, &route->out_port->peer->od->ports) {
+        if (port->peer) {
+            /* This is a LSP connected to an LRP */
+            struct lport_addresses *addresses = &port->peer->lrp_networks;
+            publish_lport_addresses(ovnsb_txn, route_map, route->od->sb,
+                                    route->out_port->key, addresses);
+
+            const struct lr_stateful_record *lr_stateful_rec;
+            lr_stateful_rec = lr_stateful_table_find_by_index(lr_stateful_table,
+                                                              port->peer->od->index);
+            struct ovn_port_routable_addresses addrs = get_op_addresses(
+                port->peer, lr_stateful_rec, false);
+            for (int i = 0; i < addrs.n_addrs; i++) {
+                publish_lport_addresses(ovnsb_txn, route_map, route->od->sb,
+                                        route->out_port->key, &addrs.laddrs[i]);
+            }
+        } else {
+            /* This is just a plain LSP */
+            // TODO
+        }
+    }
+}
+
+static void
 routes_table_sync(struct ovsdb_idl_txn *ovnsb_txn,
                   const struct sbrec_route_table *sbrec_route_table,
+                  const struct lr_stateful_table *lr_stateful_table,
                   const struct hmap *parsed_routes,
                   const struct hmap *lr_ports,
                   const struct ovn_datapaths *lr_datapaths,
@@ -295,21 +385,18 @@ routes_table_sync(struct ovsdb_idl_txn *ovnsb_txn,
         if (route->source == ROUTE_SOURCE_STATIC && !smap_get_bool(&route->out_port->nbrp->options, "dynamic-routing-static", false)) {
             continue;
         }
-        route_e = route_lookup_or_add(&sync_routes,
-                                      route->od->sb,
-                                      route->out_port->key,
-                                      &route->prefix,
-                                      route->plen,
-                                      "advertise");
-        route_e->stale = false;
 
-        if (!route_e->sb_route) {
-            const struct sbrec_route *sr = sbrec_route_insert(ovnsb_txn);
-            sbrec_route_set_datapath(sr, route_e->sb_db);
-            sbrec_route_set_logical_port(sr, route_e->logical_port);
-            sbrec_route_set_ip_prefix(sr, route_e->ip_prefix);
-            sbrec_route_set_type(sr, route_e->type);
-            route_e->sb_route = sr;
+        if (smap_get_bool(&route->out_port->nbrp->options, "dynamic-routing-connected-as-host-routes", false)) {
+            publish_host_routes(ovnsb_txn, &sync_routes,
+                                lr_stateful_table, route);
+        } else {
+            char *ip_prefix = normalize_v46_prefix(&route->prefix, route->plen);
+            route_sync_to_sb(ovnsb_txn, &sync_routes,
+                             route->od->sb,
+                             route->out_port->key,
+                             ip_prefix,
+                             "advertise");
+            free(ip_prefix);
         }
     }
 

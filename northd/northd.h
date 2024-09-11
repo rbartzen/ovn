@@ -25,6 +25,7 @@
 #include "openvswitch/hmap.h"
 #include "simap.h"
 #include "ovs-thread.h"
+#include "en-lr-stateful.h"
 
 struct northd_input {
     /* Northbound table references */
@@ -908,5 +909,23 @@ is_vxlan_mode(const struct smap *nb_options,
               const struct sbrec_chassis_table *sbrec_chassis_table);
 
 uint32_t get_ovn_max_dp_key_local(bool _vxlan_mode);
+
+/* Structure representing logical router port
+ * routable addresses. This includes DNAT and Load Balancer
+ * addresses. This structure will only be filled in if the
+ * router port is a gateway router port. Otherwise, all pointers
+ * will be NULL and n_addrs will be 0.
+ */
+struct ovn_port_routable_addresses {
+    /* The parsed routable addresses */
+    struct lport_addresses *laddrs;
+    /* Number of items in the laddrs array */
+    size_t n_addrs;
+};
+
+struct ovn_port_routable_addresses get_op_addresses(
+    struct ovn_port *op,
+    const struct lr_stateful_record *lr_stateful_rec,
+    bool routable_only);
 
 #endif /* NORTHD_H */

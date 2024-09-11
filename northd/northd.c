@@ -1096,19 +1096,6 @@ build_datapaths(struct ovsdb_idl_txn *ovnsb_txn,
     ods_build_array_index(lr_datapaths);
 }
 
-/* Structure representing logical router port
- * routable addresses. This includes DNAT and Load Balancer
- * addresses. This structure will only be filled in if the
- * router port is a gateway router port. Otherwise, all pointers
- * will be NULL and n_addrs will be 0.
- */
-struct ovn_port_routable_addresses {
-    /* The parsed routable addresses */
-    struct lport_addresses *laddrs;
-    /* Number of items in the laddrs array */
-    size_t n_addrs;
-};
-
 static bool lsp_can_be_inc_processed(const struct nbrec_logical_switch_port *);
 
 /* This function returns true if 'op' is a gateway router port.
@@ -1157,12 +1144,13 @@ static char **get_nat_addresses(const struct ovn_port *op, size_t *n,
                                 const struct lr_stateful_record *,
                                 bool allow_ipv6);
 
-static struct ovn_port_routable_addresses
-get_op_routable_addresses(struct ovn_port *op,
-                          const struct lr_stateful_record *lr_stateful_rec)
+struct ovn_port_routable_addresses
+get_op_addresses(struct ovn_port *op,
+                 const struct lr_stateful_record *lr_stateful_rec,
+                 bool routable_only)
 {
     size_t n;
-    char **nats = get_nat_addresses(op, &n, true, true, lr_stateful_rec,
+    char **nats = get_nat_addresses(op, &n, routable_only, true, lr_stateful_rec,
                                     false);
 
     if (!nats) {
@@ -1194,6 +1182,13 @@ get_op_routable_addresses(struct ovn_port *op,
         .laddrs = laddrs,
         .n_addrs = n_addrs,
     };
+}
+
+static struct ovn_port_routable_addresses
+get_op_routable_addresses(struct ovn_port *op,
+                          const struct lr_stateful_record *lr_stateful_rec)
+{
+    return get_op_addresses(op, lr_stateful_rec, true);
 }
 
 
