@@ -66,7 +66,6 @@ void
 en_routes_sync_cleanup(void *data)
 {
     routes_sync_destroy(data);
-    free(data);
 }
 
 void
