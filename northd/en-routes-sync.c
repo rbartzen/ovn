@@ -125,7 +125,9 @@ route_alloc_entry(struct hmap *routes,
     route_e->logical_port = xstrdup(logical_port);
     route_e->ip_prefix = xstrdup(ip_prefix);
     route_e->type = xstrdup(route_type);
-    route_e->tracked_port = xstrdup(tracked_port);
+    if (tracked_port) {
+        route_e->tracked_port = xstrdup(tracked_port);
+    }
     route_e->stale = false;
     uint32_t hash = uuid_hash(&sb_db->header_.uuid);
     hash = hash_string(logical_port, hash);
@@ -149,7 +151,9 @@ route_lookup_or_add(struct hmap *route_map,
     hash = hash_string(ip_prefix, hash);
     HMAP_FOR_EACH_WITH_HASH (route_e, hmap_node, hash, route_map) {
         if (!strcmp(route_e->type, route_type) &&
-            !strcmp(route_e->tracked_port, tracked_port)) {
+            // TODO this is ugly
+            ((route_e->tracked_port == NULL) == (tracked_port == NULL)) &&
+            (route_e->tracked_port == NULL || !strcmp(route_e->tracked_port, tracked_port))) {
             return route_e;
         }
     }
