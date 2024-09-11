@@ -38,6 +38,9 @@ static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(5, 20);
  * in the corresponding VRF interface name. */
 #define MAX_TABLE_ID 1000000000
 
+#define PRIORITY_DEFAULT 1000
+#define PRIORITY_LOCAL_BOUND 100
+
 static struct sset _maintained_vrfs = SSET_INITIALIZER(&_maintained_vrfs);
 
 struct route_entry {
@@ -177,6 +180,24 @@ route_exchange_relevant_port(const struct sbrec_port_binding *pb)
     return (pb && smap_get_bool(&pb->options, "dynamic-routing", false));
 }
 
+static const struct sbrec_port_binding*
+find_local_crp(const struct sset *local_lports,
+               struct ovsdb_idl_index *sbrec_port_binding_by_name,
+               const struct sbrec_port_binding *pb)
+{
+    if (!pb) {
+        return NULL;
+    }
+    const char *crp = smap_get(&pb->options, "chassis-redirect-port");
+    if (!crp) {
+        return NULL;
+    }
+    if (!sset_contains(local_lports, crp)) {
+        return NULL;
+    }
+    return lport_lookup_by_name(sbrec_port_binding_by_name, crp);
+}
+
 void
 route_exchange_run(struct route_exchange_ctx_in *r_ctx_in,
                    struct route_exchange_ctx_out *r_ctx_out)
@@ -204,18 +225,10 @@ route_exchange_run(struct route_exchange_ctx_in *r_ctx_in,
         for (size_t i = 0; i < ld->n_peer_ports; i++) {
             const struct sbrec_port_binding *local_peer
                 = ld->peer_ports[i].local;
-            if (!local_peer) {
-                continue;
-            }
-            const char *crp = smap_get(&local_peer->options, "chassis-redirect-port");
-            if (!crp) {
-                continue;
-            }
-            if (!sset_contains(r_ctx_in->local_lports, crp)) {
-                continue;
-            }
-            const struct sbrec_port_binding *sb_crp = lport_lookup_by_name(
-                r_ctx_in->sbrec_port_binding_by_name, crp);
+            const struct sbrec_port_binding *sb_crp = find_local_crp(
+                r_ctx_in->local_lports,
+                r_ctx_in->sbrec_port_binding_by_name,
+                ld->peer_ports[i].local);
             if (!route_exchange_relevant_port(sb_crp)) {
                 continue;
             }
@@ -285,7 +298,19 @@ route_exchange_run(struct route_exchange_ctx_in *r_ctx_in,
                 continue;
             }
 
-            route_insert(&local_routes, &prefix, plen);
+            unsigned int priority = PRIORITY_DEFAULT;
+
+            if (route->tracked_port) {
+                const struct sbrec_port_binding *tracked_port = lport_lookup_by_name(r_ctx_in->sbrec_port_binding_by_name, route->tracked_port);
+                if(tracked_port && find_local_crp(
+                          r_ctx_in->local_lports,
+                          r_ctx_in->sbrec_port_binding_by_name,
+                          tracked_port)) {
+                    priority = PRIORITY_LOCAL_BOUND;
+                }
+            }
+
+            route_insert(&local_routes, &prefix, plen, priority);
         }
         sbrec_route_index_destroy_row(route_filter);
 

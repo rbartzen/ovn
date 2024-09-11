@@ -5222,6 +5222,19 @@ tcp.flags = RST;
       </p>
     </column>
 
+    <column name="tracked_port">
+      <p>
+        Only relevant for type <code>advertise</code> and if
+        <code>options:dynamic-routing-connected-as-host-routes</code> is
+        set on the <code>OVN_Northbound.Logical_Router_Port</code>.
+
+        In this case this lists the name of the <code>Port_Binding</code>
+        that is holding this ip address. ovn-controller can use this
+        information to determine the distance and therefor the route priority
+        of a published route
+      </p>
+    </column>
+
     <column name="type">
       <p>
         If the route is to be exported from OVN to the outside network or if

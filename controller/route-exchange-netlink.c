@@ -106,7 +106,8 @@ re_nl_delete_vrf(const char *ifname)
 
 static int
 modify_route(const char *netns, uint32_t type, uint32_t flags_arg, uint32_t table_id,
-             struct in6_addr *dst, unsigned int plen, uint32_t oif)
+             struct in6_addr *dst, unsigned int plen, unsigned int priority,
+             uint32_t oif)
 {
     uint32_t flags = NLM_F_REQUEST | NLM_F_ACK;
     bool is_ipv4 = IN6_IS_ADDR_V4MAPPED(dst);
@@ -132,6 +133,7 @@ modify_route(const char *netns, uint32_t type, uint32_t flags_arg, uint32_t tabl
     rt->rtm_dst_len = plen;
 
     nl_msg_put_u32(&request, RTA_TABLE, table_id);
+    nl_msg_put_u32(&request, RTA_PRIORITY, priority);
 
     if (is_ipv4) {
         nl_msg_put_be32(&request, RTA_DST, in6_addr_get_mapped_ipv4(dst));
@@ -150,7 +152,8 @@ modify_route(const char *netns, uint32_t type, uint32_t flags_arg, uint32_t tabl
 }
 
 int
-re_nl_add_route(const char *netns, uint32_t table_id, struct in6_addr *dst, unsigned int plen)
+re_nl_add_route(const char *netns, uint32_t table_id, struct in6_addr *dst,
+                unsigned int plen, unsigned int priority)
 {
     uint32_t flags = NLM_F_CREATE | NLM_F_EXCL;
     uint32_t type = RTM_NEWROUTE;
@@ -162,11 +165,12 @@ re_nl_add_route(const char *netns, uint32_t table_id, struct in6_addr *dst, unsi
         return EINVAL;
     }
 
-    return modify_route(netns, type, flags, table_id, dst, plen, 0);
+    return modify_route(netns, type, flags, table_id, dst, plen, priority, 0);
 }
 
 int
-re_nl_delete_route(const char * netns, uint32_t table_id, struct in6_addr *dst, unsigned int plen)
+re_nl_delete_route(const char * netns, uint32_t table_id, struct in6_addr *dst,
+                   unsigned int plen, unsigned int priority)
 {
     if (!TABLE_ID_VALID(table_id)) {
         VLOG_WARN_RL(&rl,
@@ -175,7 +179,7 @@ re_nl_delete_route(const char * netns, uint32_t table_id, struct in6_addr *dst, 
         return EINVAL;
     }
 
-    return modify_route(netns, RTM_DELROUTE, 0, table_id, dst, plen, 0);
+    return modify_route(netns, RTM_DELROUTE, 0, table_id, dst, plen, priority, 0);
 }
 
 static uint32_t
@@ -187,13 +191,14 @@ route_hash(const struct in6_addr *dst, unsigned int plen)
 
 void
 route_insert(struct hmap *routes,
-             struct in6_addr *dst, unsigned int plen)
+             struct in6_addr *dst, unsigned int plen, unsigned int priority)
 {
     struct advertise_route_node *hr = xzalloc(sizeof *hr);
     hmap_insert(routes, &hr->hmap_node,
                 route_hash(dst, plen));
     hr->addr = *dst;
     hr->plen = plen;
+    hr->priority = priority;
 }
 
 void
@@ -244,7 +249,7 @@ handle_route_msg_delete_routes(struct route_table_msg *msg, void *data)
     uint32_t hash = route_hash(&rd->rta_dst, rd->plen);
     HMAP_FOR_EACH_WITH_HASH (ar, hmap_node, hash, routes) {
         if (ipv6_addr_equals(&ar->addr, &rd->rta_dst)
-                && ar->plen == rd->plen) {
+                && ar->plen == rd->plen && ar->priority == rd->rta_priority) {
             hmap_remove(routes, &ar->hmap_node);
             free(ar);
             return;
@@ -252,7 +257,7 @@ handle_route_msg_delete_routes(struct route_table_msg *msg, void *data)
     }
     err = re_nl_delete_route(handle_data->netns,
                              rd->rta_table_id, &rd->rta_dst,
-                             rd->plen);
+                             rd->plen, rd->rta_priority);
     if (err) {
         char addr_s[INET6_ADDRSTRLEN + 1];
         VLOG_WARN_RL(&rl, "Delete route table_id=%"PRIu32" dst=%s plen=%d: %s",
@@ -292,7 +297,8 @@ re_nl_sync_routes(uint32_t table_id,
      * table. */
     struct advertise_route_node *hr;
     HMAP_FOR_EACH_SAFE (hr, hmap_node, routes) {
-        int err = re_nl_add_route(netns, table_id, &hr->addr, hr->plen);
+        int err = re_nl_add_route(netns, table_id, &hr->addr,
+                                  hr->plen, hr->priority);
         if (err) {
             char addr_s[INET6_ADDRSTRLEN + 1];
             VLOG_WARN_RL(&rl, "Add route table_id=%"PRIu32" dst=%s plen=%d: %s",

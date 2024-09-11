@@ -36,11 +36,11 @@ test_re_nl_sync_routes(struct ovs_cmdl_context *ctx OVS_UNUSED)
     int err;
 
     ipv6_parse("2001:db8:42::100", &dst6);
-    route_insert(&host_routes, &dst6, 128);
+    route_insert(&host_routes, &dst6, 128, 0);
 
     ip_parse("172.16.42.100", &ip);
     in6_addr_set_mapped_ipv4(&dst4, ip);
-    route_insert(&host_routes, &dst4, 32);
+    route_insert(&host_routes, &dst4, 32, 0);
 
     err = re_nl_create_vrf(VRF_IFNAME, TABLE_ID);
     ovs_assert(err == 0);
@@ -49,18 +49,18 @@ test_re_nl_sync_routes(struct ovs_cmdl_context *ctx OVS_UNUSED)
     re_nl_sync_routes(TABLE_ID, &host_routes, &learned_routes, false);
     routes_destroy(&host_routes);
 
-    err = re_nl_add_route(NULL, TABLE_ID, &dst6, 128);
+    err = re_nl_add_route(NULL, TABLE_ID, &dst6, 128, 0);
     ovs_assert(err == EEXIST);
-    err = re_nl_add_route(NULL, TABLE_ID, &dst4, 32);
+    err = re_nl_add_route(NULL, TABLE_ID, &dst4, 32, 0);
     ovs_assert(err == EEXIST);
 
     hmap_init(&host_routes);
     re_nl_sync_routes(TABLE_ID, &host_routes, &learned_routes, false);
     routes_destroy(&host_routes);
 
-    err = re_nl_add_route(NULL, TABLE_ID, &dst6, 128);
+    err = re_nl_add_route(NULL, TABLE_ID, &dst6, 128, 0);
     ovs_assert(err == 0);
-    err = re_nl_add_route(NULL, TABLE_ID, &dst4, 32);
+    err = re_nl_add_route(NULL, TABLE_ID, &dst4, 32, 0);
     ovs_assert(err == 0);
 
     err = re_nl_delete_vrf(VRF_IFNAME);
@@ -107,13 +107,13 @@ test_re_nl_add_route(struct ovs_cmdl_context *ctx OVS_UNUSED)
     err = re_nl_create_vrf(VRF_IFNAME, TABLE_ID);
     ovs_assert(err == 0);
 
-    err = re_nl_add_route(NULL, TABLE_ID, &dst6, 128);
+    err = re_nl_add_route(NULL, TABLE_ID, &dst6, 128, 0);
     ovs_assert(err == 0);
-    err = re_nl_add_route(NULL, TABLE_ID, &dst4, 32);
+    err = re_nl_add_route(NULL, TABLE_ID, &dst4, 32, 0);
     ovs_assert(err == 0);
-    err = re_nl_add_route(NULL, TABLE_ID, &dst6, 128);
+    err = re_nl_add_route(NULL, TABLE_ID, &dst6, 128, 0);
     ovs_assert(err == EEXIST);
-    err = re_nl_add_route(NULL, TABLE_ID, &dst4, 32);
+    err = re_nl_add_route(NULL, TABLE_ID, &dst4, 32, 0);
     ovs_assert(err == EEXIST);
 
     err = re_nl_delete_vrf(VRF_IFNAME);
@@ -134,18 +134,18 @@ test_re_nl_delete_route(struct ovs_cmdl_context *ctx OVS_UNUSED)
     err = re_nl_create_vrf(VRF_IFNAME, TABLE_ID);
     ovs_assert(err == 0);
 
-    err = re_nl_add_route(NULL, TABLE_ID, &dst6, 128);
+    err = re_nl_add_route(NULL, TABLE_ID, &dst6, 128, 0);
     ovs_assert(err == 0);
-    err = re_nl_add_route(NULL, TABLE_ID, &dst4, 32);
+    err = re_nl_add_route(NULL, TABLE_ID, &dst4, 32, 0);
     ovs_assert(err == 0);
 
-    err = re_nl_delete_route(NULL, TABLE_ID, &dst6, 128);
+    err = re_nl_delete_route(NULL, TABLE_ID, &dst6, 128, 0);
     ovs_assert(err == 0);
-    err = re_nl_delete_route(NULL, TABLE_ID, &dst4, 32);
+    err = re_nl_delete_route(NULL, TABLE_ID, &dst4, 32, 0);
     ovs_assert(err == 0);
-    err = re_nl_delete_route(NULL, TABLE_ID, &dst6, 128);
+    err = re_nl_delete_route(NULL, TABLE_ID, &dst6, 128, 0);
     ovs_assert(err == ESRCH);
-    err = re_nl_delete_route(NULL, TABLE_ID, &dst4, 32);
+    err = re_nl_delete_route(NULL, TABLE_ID, &dst4, 32, 0);
     ovs_assert(err == ESRCH);
 
     err = re_nl_delete_vrf(VRF_IFNAME);

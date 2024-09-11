@@ -106,6 +106,7 @@ struct route_entry {
 
     char *logical_port;
     char *ip_prefix;
+    char *tracked_port;
     char *type;
     bool stale;
 };
@@ -113,7 +114,10 @@ struct route_entry {
 static struct route_entry *
 route_alloc_entry(struct hmap *routes,
                   const struct sbrec_datapath_binding *sb_db,
-                  char *logical_port, const char *ip_prefix, char *route_type)
+                  const char *logical_port,
+                  const char *ip_prefix,
+                  const char *route_type,
+                  const char *tracked_port)
 {
     struct route_entry *route_e = xzalloc(sizeof *route_e);
 
@@ -121,6 +125,7 @@ route_alloc_entry(struct hmap *routes,
     route_e->logical_port = xstrdup(logical_port);
     route_e->ip_prefix = xstrdup(ip_prefix);
     route_e->type = xstrdup(route_type);
+    route_e->tracked_port = xstrdup(tracked_port);
     route_e->stale = false;
     uint32_t hash = uuid_hash(&sb_db->header_.uuid);
     hash = hash_string(logical_port, hash);
@@ -133,8 +138,8 @@ route_alloc_entry(struct hmap *routes,
 static struct route_entry *
 route_lookup_or_add(struct hmap *route_map,
                     const struct sbrec_datapath_binding *sb_db,
-                    char *logical_port, const char *ip_prefix,
-                    char *route_type)
+                    const char *logical_port, const char *ip_prefix,
+                    const char *route_type, const char *tracked_port)
 {
     struct route_entry *route_e;
     uint32_t hash;
@@ -143,27 +148,30 @@ route_lookup_or_add(struct hmap *route_map,
     hash = hash_string(logical_port, hash);
     hash = hash_string(ip_prefix, hash);
     HMAP_FOR_EACH_WITH_HASH (route_e, hmap_node, hash, route_map) {
-        if (!strcmp(route_e->type, route_type)) {
+        if (!strcmp(route_e->type, route_type) &&
+            !strcmp(route_e->tracked_port, tracked_port)) {
             return route_e;
         }
     }
 
-    route_e =  route_alloc_entry(route_map, sb_db,
-                                 logical_port, ip_prefix, route_type);
+    route_e = route_alloc_entry(route_map, sb_db,
+                                 logical_port, ip_prefix, route_type,
+                                 tracked_port);
     return route_e;
 }
 
 static struct route_entry *
 route_sync_to_sb(struct ovsdb_idl_txn *ovnsb_txn, struct hmap *route_map,
                  const struct sbrec_datapath_binding *sb_db,
-                 char *logical_port, const char *ip_prefix,
-                 char *route_type)
+                 const char *logical_port, const char *ip_prefix,
+                 const char *route_type, const char *tracked_port)
 {
     struct route_entry *route_e = route_lookup_or_add(route_map,
                                                       sb_db,
                                                       logical_port,
                                                       ip_prefix,
-                                                      route_type);
+                                                      route_type,
+                                                      tracked_port);
     route_e->stale = false;
 
     if (!route_e->sb_route) {
@@ -172,6 +180,9 @@ route_sync_to_sb(struct ovsdb_idl_txn *ovnsb_txn, struct hmap *route_map,
         sbrec_route_set_logical_port(sr, route_e->logical_port);
         sbrec_route_set_ip_prefix(sr, route_e->ip_prefix);
         sbrec_route_set_type(sr, route_e->type);
+        if (route_e->tracked_port) {
+            sbrec_route_set_tracked_port(sr, route_e->tracked_port);
+        }
         route_e->sb_route = sr;
     }
 
@@ -275,7 +286,8 @@ publish_lport_addresses(struct ovsdb_idl_txn *ovnsb_txn,
                         struct hmap *route_map,
                         const struct sbrec_datapath_binding *sb_db,
                         char *logical_port,
-                        struct lport_addresses *addresses)
+                        struct lport_addresses *addresses,
+                        struct ovn_port *tracking_port)
 {
     for (int i = 0; i < addresses->n_ipv4_addrs; i++) {
         const struct ipv4_netaddr *addr = &addresses->ipv4_addrs[i];
@@ -284,7 +296,8 @@ publish_lport_addresses(struct ovsdb_idl_txn *ovnsb_txn,
                          sb_db,
                          logical_port,
                          addr_s,
-                         "advertise");
+                         "advertise",
+                         tracking_port->sb->logical_port);
         free(addr_s);
     }
     for (int i = 0; i < addresses->n_ipv6_addrs; i++) {
@@ -297,7 +310,8 @@ publish_lport_addresses(struct ovsdb_idl_txn *ovnsb_txn,
                          sb_db,
                          logical_port,
                          addr_s,
-                         "advertise");
+                         "advertise",
+                         tracking_port->sb->logical_port);
         free(addr_s);
     }
 }
@@ -315,7 +329,8 @@ publish_host_routes(struct ovsdb_idl_txn *ovnsb_txn,
             /* This is a LSP connected to an LRP */
             struct lport_addresses *addresses = &port->peer->lrp_networks;
             publish_lport_addresses(ovnsb_txn, route_map, route->od->sb,
-                                    route->out_port->key, addresses);
+                                    route->out_port->key,
+                                    addresses, port->peer);
 
             const struct lr_stateful_record *lr_stateful_rec;
             lr_stateful_rec = lr_stateful_table_find_by_index(lr_stateful_table,
@@ -324,11 +339,18 @@ publish_host_routes(struct ovsdb_idl_txn *ovnsb_txn,
                 port->peer, lr_stateful_rec, false);
             for (int i = 0; i < addrs.n_addrs; i++) {
                 publish_lport_addresses(ovnsb_txn, route_map, route->od->sb,
-                                        route->out_port->key, &addrs.laddrs[i]);
+                                        route->out_port->key,
+                                        &addrs.laddrs[i],
+                                        port->peer);
             }
         } else {
             /* This is just a plain LSP */
-            // TODO
+            for (int i = 0; i < port->n_lsp_addrs; i++) {
+                publish_lport_addresses(ovnsb_txn, route_map, route->od->sb,
+                                        route->out_port->key,
+                                        &port->lsp_addrs[i],
+                                        port);
+            }
         }
     }
 }
@@ -357,7 +379,8 @@ routes_table_sync(struct ovsdb_idl_txn *ovnsb_txn,
                                     sb_route->datapath,
                                     sb_route->logical_port,
                                     sb_route->ip_prefix,
-                                    sb_route->type);
+                                    sb_route->type,
+                                    sb_route->tracked_port);
         route_e->stale = true;
         route_e->sb_route = sb_route;
 
@@ -395,7 +418,8 @@ routes_table_sync(struct ovsdb_idl_txn *ovnsb_txn,
                              route->od->sb,
                              route->out_port->key,
                              ip_prefix,
-                             "advertise");
+                             "advertise",
+                             NULL);
             free(ip_prefix);
         }
     }
