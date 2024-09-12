@@ -122,13 +122,13 @@ modify_route(const char *netns, uint32_t type, uint32_t flags_arg, uint32_t tabl
     rt = ofpbuf_put_zeros(&request, sizeof *rt);
     rt->rtm_family = is_ipv4 ? AF_INET : AF_INET6;
     rt->rtm_table = RT_TABLE_UNSPEC; /* RTA_TABLE attribute allows id > 256 */
+    /* Manage only OVN routes */
+    rt->rtm_protocol = RTPROT_OVN;
+    rt->rtm_type = RTN_BLACKHOLE;
     if (type == RTM_DELROUTE) {
         rt->rtm_scope = RT_SCOPE_NOWHERE;
     } else {
-        rt->rtm_protocol = RTPROT_OVN;
         rt->rtm_scope = RT_SCOPE_UNIVERSE;
-        //rt->rtm_type = RTN_UNICAST;
-        rt->rtm_type = RTN_BLACKHOLE;
     }
     rt->rtm_dst_len = plen;
 
