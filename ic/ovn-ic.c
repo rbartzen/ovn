@@ -68,6 +68,7 @@ struct ic_context {
     struct ovsdb_idl_index *nbrec_port_by_name;
     struct ovsdb_idl_index *sbrec_chassis_by_name;
     struct ovsdb_idl_index *sbrec_port_binding_by_name;
+    struct ovsdb_idl_index *sbrec_route_by_logical_port;
     struct ovsdb_idl_index *icnbrec_transit_switch_by_name;
     struct ovsdb_idl_index *icsbrec_port_binding_by_az;
     struct ovsdb_idl_index *icsbrec_port_binding_by_ts;
@@ -1554,6 +1555,52 @@ advertise_routes(struct ic_context *ctx,
 }
 
 static void
+build_dynamic_routes_to_adv(struct ic_context *ctx,
+                            struct ic_router_info *ic_lr,
+                            struct hmap *routes_ad,
+                            struct lport_addresses *ts_port_addrs,
+                            const struct nbrec_nb_global *nb_global)
+{
+    const struct nbrec_logical_router *lr = ic_lr->lr;
+
+    /* Check directly-connected subnets of the LR */
+    for (int i = 0; i < lr->n_ports; i++) {
+        const struct nbrec_logical_router_port *lrp = lr->ports[i];
+        if (!lrp_is_ts_port(ctx, ic_lr, lrp->name)) {
+            struct sbrec_route *route_filter = sbrec_route_index_init_row(
+                ctx->sbrec_route_by_logical_port);
+            sbrec_route_index_set_logical_port(route_filter, lrp->name);
+            struct sbrec_route *route;
+            SBREC_ROUTE_FOR_EACH_EQUAL(route, route_filter, ctx->sbrec_route_by_logical_port) {
+                if (!strcmp(route->type, "receive")) {
+                    continue;
+                }
+                struct in6_addr *nexthop = xmalloc(sizeof(*nexthop));
+                unsigned int plen;
+                if (!ip46_parse_cidr(route->nexthop, nexthop, &plen)) {
+                    continue;
+                }
+
+                struct in6_addr prefix;
+                plen = 0;
+                if (!ip46_parse_cidr(route->ip_prefix, &prefix, &plen)) {
+                    /* skip advertised routes without nexthop - local_ports
+                     * TODO: create a better way to propagate dinamic routes
+                     * created by ovn-controller in the SB route table. */
+                    continue;
+                }
+
+                add_network_to_routes_ad(routes_ad, route->ip_prefix, lrp,
+                                         ts_port_addrs,
+                                         &nb_global->options,
+                                         lr);
+            }
+            sbrec_route_index_destroy_row(route_filter);
+        }
+    }
+}
+
+static void
 build_ts_routes_to_adv(struct ic_context *ctx,
                        struct ic_router_info *ic_lr,
                        struct hmap *routes_ad,
@@ -1651,6 +1698,8 @@ collect_lr_routes(struct ic_context *ctx,
         route_table = get_route_table_by_lrp_name(ctx, lrp_name);
         build_ts_routes_to_adv(ctx, ic_lr, routes_ad, &ts_port_addrs,
                                nb_global, route_table);
+        build_dynamic_routes_to_adv(ctx, ic_lr, routes_ad, &ts_port_addrs,
+                                    nb_global);
         destroy_lport_addresses(&ts_port_addrs);
     }
 }
@@ -2169,6 +2218,12 @@ main(int argc, char *argv[])
                          &sbrec_port_binding_col_external_ids);
     ovsdb_idl_add_column(ovnsb_idl_loop.idl,
                          &sbrec_port_binding_col_chassis);
+    ovsdb_idl_add_column(ovnsb_idl_loop.idl,
+                         &sbrec_route_col_logical_port);
+    ovsdb_idl_add_column(ovnsb_idl_loop.idl,
+                         &sbrec_route_col_ip_prefix);
+    ovsdb_idl_add_column(ovnsb_idl_loop.idl,
+                         &sbrec_route_col_nexthop);
 
     /* Create IDL indexes */
     struct ovsdb_idl_index *nbrec_ls_by_name
@@ -2186,6 +2241,9 @@ main(int argc, char *argv[])
     struct ovsdb_idl_index *sbrec_chassis_by_name
         = ovsdb_idl_index_create1(ovnsb_idl_loop.idl,
                                   &sbrec_chassis_col_name);
+    struct ovsdb_idl_index *sbrec_route_by_logical_port
+        = ovsdb_idl_index_create1(ovnsb_idl_loop.idl,
+                                  &sbrec_route_col_logical_port);
 
     struct ovsdb_idl_index *icnbrec_transit_switch_by_name
         = ovsdb_idl_index_create1(ovninb_idl_loop.idl,
@@ -2268,6 +2326,7 @@ main(int argc, char *argv[])
                 .nbrec_port_by_name = nbrec_port_by_name,
                 .sbrec_port_binding_by_name = sbrec_port_binding_by_name,
                 .sbrec_chassis_by_name = sbrec_chassis_by_name,
+                .sbrec_route_by_logical_port = sbrec_route_by_logical_port,
                 .icnbrec_transit_switch_by_name =
                     icnbrec_transit_switch_by_name,
                 .icsbrec_port_binding_by_az = icsbrec_port_binding_by_az,
