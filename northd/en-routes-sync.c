@@ -149,10 +149,12 @@ route_lookup_or_add(struct hmap *route_map,
     hash = hash_string(logical_port, hash);
     hash = hash_string(ip_prefix, hash);
     HMAP_FOR_EACH_WITH_HASH (route_e, hmap_node, hash, route_map) {
-        if (!strcmp(route_e->type, route_type) &&
+// TODO disable this check temporally
+//        if (!strcmp(route_e->type, route_type) &&
             // TODO this is ugly
-            ((route_e->tracked_port == NULL) == (tracked_port == NULL)) &&
-            (route_e->tracked_port == NULL || !strcmp(route_e->tracked_port, tracked_port))) {
+//            ((route_e->tracked_port != NULL) == (tracked_port != NULL)) &&
+//            (route_e->tracked_port == NULL || !strcmp(route_e->tracked_port, tracked_port))) {
+        if (!strcmp(route_e->type, route_type)) {
             return route_e;
         }
     }
