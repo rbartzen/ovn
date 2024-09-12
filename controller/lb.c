@@ -23,6 +23,7 @@
 /* OVN includes */
 #include "lb.h"
 #include "lib/ovn-sb-idl.h"
+#include "local_data.h"
 #include "ovn/lex.h"
 
 VLOG_DEFINE_THIS_MODULE(controller_lb);
@@ -144,3 +145,121 @@ ovn_controller_lb_find(const struct hmap *ovn_controller_lbs,
     return NULL;
 }
 
+static struct load_balancers_by_dp *
+load_balancers_by_dp_create(struct hmap *lbs,
+                            const struct sbrec_datapath_binding *dp)
+{
+    struct load_balancers_by_dp *lbs_by_dp = xzalloc(sizeof *lbs_by_dp);
+
+    lbs_by_dp->dp = dp;
+    hmap_insert(lbs, &lbs_by_dp->node, hash_uint64(dp->tunnel_key));
+    return lbs_by_dp;
+}
+
+static void
+load_balancers_by_dp_destroy(struct load_balancers_by_dp *lbs_by_dp)
+{
+    if (!lbs_by_dp) {
+        return;
+    }
+
+    free(lbs_by_dp->dp_lbs);
+    free(lbs_by_dp);
+}
+
+struct load_balancers_by_dp *
+load_balancers_by_dp_find(struct hmap *lbs,
+                          const struct sbrec_datapath_binding *dp)
+{
+    uint32_t hash = hash_uint64(dp->tunnel_key);
+    struct load_balancers_by_dp *lbs_by_dp;
+
+    HMAP_FOR_EACH_WITH_HASH (lbs_by_dp, node, hash, lbs) {
+        if (lbs_by_dp->dp == dp) {
+            return lbs_by_dp;
+        }
+    }
+    return NULL;
+}
+
+static void
+load_balancers_by_dp_add_one(const struct hmap *local_datapaths,
+                             const struct sbrec_datapath_binding *datapath,
+                             const struct sbrec_load_balancer *lb,
+                             struct hmap *lbs)
+{
+    struct local_datapath *ldp =
+        get_local_datapath(local_datapaths, datapath->tunnel_key);
+
+    if (!ldp) {
+        return;
+    }
+
+    struct load_balancers_by_dp *lbs_by_dp =
+        load_balancers_by_dp_find(lbs, ldp->datapath);
+    if (!lbs_by_dp) {
+        lbs_by_dp = load_balancers_by_dp_create(lbs, ldp->datapath);
+    }
+
+    if (lbs_by_dp->n_dp_lbs == lbs_by_dp->n_allocated_dp_lbs) {
+        lbs_by_dp->dp_lbs = x2nrealloc(lbs_by_dp->dp_lbs,
+                                       &lbs_by_dp->n_allocated_dp_lbs,
+                                       sizeof *lbs_by_dp->dp_lbs);
+    }
+    lbs_by_dp->dp_lbs[lbs_by_dp->n_dp_lbs++] = lb;
+}
+
+/* Builds and returns a hmap of 'load_balancers_by_dp', one record for each
+ * local datapath.
+ */
+struct hmap *
+load_balancers_by_dp_init(const struct hmap *local_datapaths,
+                          const struct sbrec_load_balancer_table *lb_table)
+{
+    struct hmap *lbs = xmalloc(sizeof *lbs);
+    hmap_init(lbs);
+
+    const struct sbrec_load_balancer *lb;
+    SBREC_LOAD_BALANCER_TABLE_FOR_EACH (lb, lb_table) {
+        for (size_t i = 0; i < lb->n_datapaths; i++) {
+            load_balancers_by_dp_add_one(local_datapaths,
+                                         lb->datapaths[i], lb, lbs);
+        }
+        /* datapath_group column is deprecated. */
+        for (size_t i = 0; lb->datapath_group
+                           && i < lb->datapath_group->n_datapaths; i++) {
+            load_balancers_by_dp_add_one(local_datapaths,
+                                         lb->datapath_group->datapaths[i],
+                                         lb, lbs);
+        }
+        for (size_t i = 0; lb->ls_datapath_group
+                           && i < lb->ls_datapath_group->n_datapaths; i++) {
+            load_balancers_by_dp_add_one(local_datapaths,
+                                         lb->ls_datapath_group->datapaths[i],
+                                         lb, lbs);
+        }
+        for (size_t i = 0; lb->lr_datapath_group
+                           && i < lb->lr_datapath_group->n_datapaths; i++) {
+            load_balancers_by_dp_add_one(local_datapaths,
+                                         lb->lr_datapath_group->datapaths[i],
+                                         lb, lbs);
+        }
+    }
+    return lbs;
+}
+
+void
+load_balancers_by_dp_cleanup(struct hmap *lbs)
+{
+    if (!lbs) {
+        return;
+    }
+
+    struct load_balancers_by_dp *lbs_by_dp;
+
+    HMAP_FOR_EACH_POP (lbs_by_dp, node, lbs) {
+        load_balancers_by_dp_destroy(lbs_by_dp);
+    }
+    hmap_destroy(lbs);
+    free(lbs);
+}

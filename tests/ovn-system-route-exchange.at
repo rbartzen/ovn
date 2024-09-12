@@ -1,0 +1,16 @@
+#
+# System level unit tests for controller/route-exchange-netlink.c module.
+#
+AT_BANNER([OVN system level unit tests])
+
+AT_SETUP([system level unit test -- route-exchange-netlink])
+AT_KEYWORDS([route-exchange])
+
+CHECK_VRF()
+
+AT_CHECK([ovstest test-route-exchange-netlink sync-routes], [0], [])
+AT_CHECK([ovstest test-route-exchange-netlink create-vrf], [0], [])
+AT_CHECK([ovstest test-route-exchange-netlink delete-vrf], [0], [])
+AT_CHECK([ovstest test-route-exchange-netlink add-route], [0], [])
+AT_CHECK([ovstest test-route-exchange-netlink delete-route], [0], [])
+AT_CLEANUP

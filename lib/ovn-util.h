@@ -44,6 +44,7 @@ struct ovsrec_flow_sample_collector_set_table;
 struct sbrec_datapath_binding;
 struct sbrec_logical_flow;
 struct sbrec_port_binding;
+struct sbrec_chassis;
 struct smap;
 struct svec;
 struct uuid;
@@ -205,6 +206,7 @@ bool ip46_parse(const char *ip_str, struct in6_addr *ip);
 char *normalize_ipv4_prefix(ovs_be32 ipv4, unsigned int plen);
 char *normalize_ipv6_prefix(const struct in6_addr *ipv6, unsigned int plen);
 char *normalize_v46_prefix(const struct in6_addr *prefix, unsigned int plen);
+char *normalize_v46(const struct in6_addr *prefix);
 
 /* Returns a lowercase copy of orig.
  * Caller must free the returned string.
@@ -350,6 +352,16 @@ int64_t daemon_startup_ts(void);
 char *lr_lb_address_set_name(uint32_t lr_tunnel_key, int addr_family);
 char *lr_lb_address_set_ref(uint32_t lr_tunnel_key, int addr_family);
 
+struct chassis_aa_network {
+    char* network_name;
+    struct lport_addresses* addresses;
+    size_t n_addresses;
+};
+
+bool chassis_find_aa_networks(const struct sbrec_chassis *,
+                              const char* network_name,
+                              struct chassis_aa_network* chassis_aa_network);
+
 const char *
 get_chassis_external_id_value(const struct smap *,
                               const char *chassis_id,
@@ -483,5 +495,11 @@ void ovn_exit_args_finish(struct ovn_exit_args *exit_args);
 
 bool ovn_update_swconn_at(struct rconn *swconn, const char *target,
                           int probe_interval, const char *where);
+
+bool extract_addresses_with_port(const char *addresses,
+                                 struct lport_addresses *laddrs,
+                                 char **lport);
+
+bool prefix_is_link_local(const struct in6_addr *prefix, unsigned int plen);
 
 #endif /* OVN_UTIL_H */

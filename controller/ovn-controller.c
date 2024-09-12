@@ -87,6 +87,7 @@
 #include "statctrl.h"
 #include "lib/dns-resolve.h"
 #include "ct-zone.h"
+#include "route-exchange.h"
 
 VLOG_DEFINE_THIS_MODULE(main);
 
@@ -857,7 +858,8 @@ ctrl_register_ovs_idl(struct ovsdb_idl *ovs_idl)
     SB_NODE(fdb, "fdb") \
     SB_NODE(meter, "meter") \
     SB_NODE(static_mac_binding, "static_mac_binding") \
-    SB_NODE(chassis_template_var, "chassis_template_var")
+    SB_NODE(chassis_template_var, "chassis_template_var") \
+    SB_NODE(route, "route")
 
 enum sb_engine_node {
 #define SB_NODE(NAME, NAME_STR) SB_##NAME,
@@ -2367,134 +2369,6 @@ en_mff_ovn_geneve_run(struct engine_node *node, void *data)
         return;
     }
     engine_set_node_state(node, EN_UNCHANGED);
-}
-
-/* Stores the load balancers that are applied to the datapath 'dp'. */
-struct load_balancers_by_dp {
-    struct hmap_node node;
-    const struct sbrec_datapath_binding *dp;
-    const struct sbrec_load_balancer **dp_lbs;
-    size_t n_allocated_dp_lbs;
-    size_t n_dp_lbs;
-};
-
-static struct load_balancers_by_dp *
-load_balancers_by_dp_create(struct hmap *lbs,
-                            const struct sbrec_datapath_binding *dp)
-{
-    struct load_balancers_by_dp *lbs_by_dp = xzalloc(sizeof *lbs_by_dp);
-
-    lbs_by_dp->dp = dp;
-    hmap_insert(lbs, &lbs_by_dp->node, hash_uint64(dp->tunnel_key));
-    return lbs_by_dp;
-}
-
-static void
-load_balancers_by_dp_destroy(struct load_balancers_by_dp *lbs_by_dp)
-{
-    if (!lbs_by_dp) {
-        return;
-    }
-
-    free(lbs_by_dp->dp_lbs);
-    free(lbs_by_dp);
-}
-
-static struct load_balancers_by_dp *
-load_balancers_by_dp_find(struct hmap *lbs,
-                          const struct sbrec_datapath_binding *dp)
-{
-    uint32_t hash = hash_uint64(dp->tunnel_key);
-    struct load_balancers_by_dp *lbs_by_dp;
-
-    HMAP_FOR_EACH_WITH_HASH (lbs_by_dp, node, hash, lbs) {
-        if (lbs_by_dp->dp == dp) {
-            return lbs_by_dp;
-        }
-    }
-    return NULL;
-}
-
-static void
-load_balancers_by_dp_add_one(const struct hmap *local_datapaths,
-                             const struct sbrec_datapath_binding *datapath,
-                             const struct sbrec_load_balancer *lb,
-                             struct hmap *lbs)
-{
-    struct local_datapath *ldp =
-        get_local_datapath(local_datapaths, datapath->tunnel_key);
-
-    if (!ldp) {
-        return;
-    }
-
-    struct load_balancers_by_dp *lbs_by_dp =
-        load_balancers_by_dp_find(lbs, ldp->datapath);
-    if (!lbs_by_dp) {
-        lbs_by_dp = load_balancers_by_dp_create(lbs, ldp->datapath);
-    }
-
-    if (lbs_by_dp->n_dp_lbs == lbs_by_dp->n_allocated_dp_lbs) {
-        lbs_by_dp->dp_lbs = x2nrealloc(lbs_by_dp->dp_lbs,
-                                       &lbs_by_dp->n_allocated_dp_lbs,
-                                       sizeof *lbs_by_dp->dp_lbs);
-    }
-    lbs_by_dp->dp_lbs[lbs_by_dp->n_dp_lbs++] = lb;
-}
-
-/* Builds and returns a hmap of 'load_balancers_by_dp', one record for each
- * local datapath.
- */
-static struct hmap *
-load_balancers_by_dp_init(const struct hmap *local_datapaths,
-                          const struct sbrec_load_balancer_table *lb_table)
-{
-    struct hmap *lbs = xmalloc(sizeof *lbs);
-    hmap_init(lbs);
-
-    const struct sbrec_load_balancer *lb;
-    SBREC_LOAD_BALANCER_TABLE_FOR_EACH (lb, lb_table) {
-        for (size_t i = 0; i < lb->n_datapaths; i++) {
-            load_balancers_by_dp_add_one(local_datapaths,
-                                         lb->datapaths[i], lb, lbs);
-        }
-        /* datapath_group column is deprecated. */
-        for (size_t i = 0; lb->datapath_group
-                           && i < lb->datapath_group->n_datapaths; i++) {
-            load_balancers_by_dp_add_one(local_datapaths,
-                                         lb->datapath_group->datapaths[i],
-                                         lb, lbs);
-        }
-        for (size_t i = 0; lb->ls_datapath_group
-                           && i < lb->ls_datapath_group->n_datapaths; i++) {
-            load_balancers_by_dp_add_one(local_datapaths,
-                                         lb->ls_datapath_group->datapaths[i],
-                                         lb, lbs);
-        }
-        for (size_t i = 0; lb->lr_datapath_group
-                           && i < lb->lr_datapath_group->n_datapaths; i++) {
-            load_balancers_by_dp_add_one(local_datapaths,
-                                         lb->lr_datapath_group->datapaths[i],
-                                         lb, lbs);
-        }
-    }
-    return lbs;
-}
-
-static void
-load_balancers_by_dp_cleanup(struct hmap *lbs)
-{
-    if (!lbs) {
-        return;
-    }
-
-    struct load_balancers_by_dp *lbs_by_dp;
-
-    HMAP_FOR_EACH_POP (lbs_by_dp, node, lbs) {
-        load_balancers_by_dp_destroy(lbs_by_dp);
-    }
-    hmap_destroy(lbs);
-    free(lbs);
 }
 
 /* Engine node which is used to handle runtime related data to
@@ -4716,6 +4590,14 @@ controller_output_mac_cache_handler(struct engine_node *node,
     return true;
 }
 
+static bool
+controller_output_route_exchange_handler(struct engine_node *node,
+                                         void *data OVS_UNUSED)
+{
+    engine_set_node_state(node, EN_UPDATED);
+    return true;
+}
+
 /* Handles sbrec_chassis changes.
  * If a new chassis is added or removed return false, so that
  * flows are recomputed.  For any updates, there is no need for
@@ -4736,6 +4618,190 @@ pflow_lflow_output_sb_chassis_handler(struct engine_node *node,
         }
     }
 
+    return true;
+}
+
+struct ed_type_route_exchange {
+    /* Contains struct tracked_datapath entries for local datapaths subject to
+     * route exchange. */
+    struct hmap tracked_re_datapaths;
+};
+
+static void
+en_route_exchange_run(struct engine_node *node, void *data)
+{
+    struct ed_type_route_exchange *re_data = data;
+    const struct ovsrec_open_vswitch_table *ovs_table =
+        EN_OVSDB_GET(engine_get_input("OVS_open_vswitch", node));
+    const char *chassis_id = get_ovs_chassis_id(ovs_table);
+    ovs_assert(chassis_id);
+
+    struct ovsdb_idl_index *sbrec_chassis_by_name =
+        engine_ovsdb_node_get_index(
+                engine_get_input("SB_chassis", node),
+                "name");
+    const struct sbrec_chassis *chassis
+        = chassis_lookup_by_name(sbrec_chassis_by_name, chassis_id);
+    ovs_assert(chassis);
+
+    struct ovsdb_idl_index *sbrec_port_binding_by_name =
+        engine_ovsdb_node_get_index(
+                engine_get_input("SB_port_binding", node),
+                "name");
+    struct ed_type_runtime_data *rt_data =
+        engine_get_input_data("runtime_data", node);
+
+    const struct sbrec_load_balancer_table *lb_table =
+        EN_OVSDB_GET(engine_get_input("SB_load_balancer", node));
+    struct ed_type_lb_data *lb_data =
+        engine_get_input_data("lb_data", node);
+
+    struct ovsdb_idl_index *sbrec_route_by_datapath =
+        engine_ovsdb_node_get_index(
+            engine_get_input("SB_route", node), "datapath");
+
+    struct route_exchange_ctx_in r_ctx_in = {
+        .ovnsb_idl_txn = engine_get_context()->ovnsb_idl_txn,
+        .sbrec_port_binding_by_name = sbrec_port_binding_by_name,
+        .lb_table = lb_table,
+        .chassis_rec = chassis,
+        .active_tunnels = &rt_data->active_tunnels,
+        .local_datapaths = &rt_data->local_datapaths,
+        .local_lbs = &lb_data->local_lbs,
+        .local_lports = &rt_data->local_lports,
+        .sbrec_route_by_datapath = sbrec_route_by_datapath,
+    };
+
+    struct route_exchange_ctx_out r_ctx_out = {
+        .tracked_re_datapaths = &re_data->tracked_re_datapaths,
+    };
+
+
+    route_exchange_run(&r_ctx_in, &r_ctx_out);
+
+    engine_set_node_state(node, EN_UPDATED);
+}
+
+
+static void *
+en_route_exchange_init(struct engine_node *node OVS_UNUSED,
+                       struct engine_arg *arg OVS_UNUSED)
+{
+    struct ed_type_route_exchange *data = xzalloc(sizeof *data);
+
+    hmap_init(&data->tracked_re_datapaths);
+
+    return data;
+}
+
+static void
+en_route_exchange_cleanup(void *data)
+{
+    struct ed_type_route_exchange *re_data = data;
+
+    tracked_datapaths_destroy(&re_data->tracked_re_datapaths);
+}
+
+static void
+en_route_exchange_clear_tracked_data(void *data)
+{
+    struct ed_type_route_exchange *re_data = data;
+
+    tracked_datapaths_destroy(&re_data->tracked_re_datapaths);
+    hmap_init(&re_data->tracked_re_datapaths);
+}
+
+static bool
+route_exchange_runtime_data_handler(struct engine_node *node, void *data)
+{
+    struct ed_type_route_exchange *re_data = data;
+    struct ed_type_runtime_data *rt_data =
+        engine_get_input_data("runtime_data", node);
+
+    if (!rt_data->tracked) {
+        return false;
+    }
+
+    struct tracked_datapath *t_dp;
+    HMAP_FOR_EACH (t_dp, node, &rt_data->tracked_dp_bindings) {
+        struct tracked_datapath *re_t_dp =
+            tracked_datapath_find(&re_data->tracked_re_datapaths, t_dp->dp);
+
+        if (re_t_dp) {
+            /* Until we get I-P support for route exchange we need to request
+             * recompute. */
+            return false;
+        }
+
+        struct shash_node *shash_node;
+        SHASH_FOR_EACH (shash_node, &t_dp->lports) {
+            struct tracked_lport *lport = shash_node->data;
+            if (route_exchange_relevant_port(lport->pb)) {
+                /* Until we get I-P support for route exchange we need to
+                 * request recompute. */
+                return false;
+            }
+        }
+    }
+
+    return true;
+}
+
+static bool
+route_exchange_lb_data_handler(struct engine_node *node,
+                               void *data)
+{
+    struct ed_type_route_exchange *re_data = data;
+    struct ed_type_runtime_data *rt_data =
+        engine_get_input_data("runtime_data", node);
+    struct ed_type_lb_data *lb_data =
+        engine_get_input_data("lb_data", node);
+    const struct sbrec_load_balancer_table *lb_table =
+        EN_OVSDB_GET(engine_get_input("SB_load_balancer", node));
+
+    if (!lb_data->change_tracked) {
+        return false;
+    }
+
+    if (!rt_data->tracked) {
+        return false;
+    }
+
+    if (hmap_is_empty(&re_data->tracked_re_datapaths)) {
+        return true;
+    }
+
+    struct hmap *tracked_dp_bindings = &rt_data->tracked_dp_bindings;
+    if (hmap_is_empty(tracked_dp_bindings)) {
+        return true;
+    }
+
+    struct hmap *lbs = NULL;
+
+    struct tracked_datapath *t_dp;
+    HMAP_FOR_EACH (t_dp, node, tracked_dp_bindings) {
+        struct tracked_datapath *re_t_dp =
+            tracked_datapath_find(&re_data->tracked_re_datapaths, t_dp->dp);
+
+        if (!re_t_dp) {
+            continue;
+        }
+
+        if (!lbs) {
+            lbs = load_balancers_by_dp_init(&rt_data->local_datapaths,
+                                            lb_table);
+        }
+
+        struct load_balancers_by_dp *lbs_by_dp =
+            load_balancers_by_dp_find(lbs, re_t_dp->dp);
+        if (lbs_by_dp) {
+            /* Until we get I-P support for route exchange we need to
+             * request recompute. */
+            load_balancers_by_dp_cleanup(lbs);
+            return false;
+        }
+    }
+    load_balancers_by_dp_cleanup(lbs);
     return true;
 }
 
@@ -4944,6 +5010,9 @@ main(int argc, char *argv[])
     struct ovsdb_idl_index *sbrec_chassis_template_var_index_by_chassis
         = ovsdb_idl_index_create1(ovnsb_idl_loop.idl,
                                   &sbrec_chassis_template_var_col_chassis);
+    struct ovsdb_idl_index *sbrec_route_index_by_datapath
+        = ovsdb_idl_index_create1(ovnsb_idl_loop.idl,
+                                  &sbrec_route_col_datapath);
 
     ovsdb_idl_track_add_all(ovnsb_idl_loop.idl);
     ovsdb_idl_omit_alert(ovnsb_idl_loop.idl,
@@ -5025,6 +5094,7 @@ main(int argc, char *argv[])
     ENGINE_NODE(if_status_mgr, "if_status_mgr");
     ENGINE_NODE_WITH_CLEAR_TRACK_DATA(lb_data, "lb_data");
     ENGINE_NODE(mac_cache, "mac_cache");
+    ENGINE_NODE_WITH_CLEAR_TRACK_DATA(route_exchange, "route_exchange");
 
 #define SB_NODE(NAME, NAME_STR) ENGINE_NODE_SB(NAME, NAME_STR);
     SB_NODES
@@ -5046,6 +5116,19 @@ main(int argc, char *argv[])
                      lb_data_template_var_handler);
     engine_add_input(&en_lb_data, &en_runtime_data,
                      lb_data_runtime_data_handler);
+
+    engine_add_input(&en_route_exchange, &en_ovs_open_vswitch, NULL);
+    engine_add_input(&en_route_exchange, &en_sb_chassis, NULL);
+    engine_add_input(&en_route_exchange, &en_sb_port_binding,
+                     engine_noop_handler);
+    engine_add_input(&en_route_exchange, &en_runtime_data,
+                     route_exchange_runtime_data_handler);
+    engine_add_input(&en_route_exchange, &en_sb_load_balancer,
+                     engine_noop_handler);
+    engine_add_input(&en_route_exchange, &en_lb_data,
+                     route_exchange_lb_data_handler);
+    engine_add_input(&en_route_exchange, &en_sb_route,
+                     engine_noop_handler);
 
     engine_add_input(&en_addr_sets, &en_sb_address_set,
                      addr_sets_sb_address_set_handler);
@@ -5221,6 +5304,8 @@ main(int argc, char *argv[])
                      controller_output_pflow_output_handler);
     engine_add_input(&en_controller_output, &en_mac_cache,
                      controller_output_mac_cache_handler);
+    engine_add_input(&en_controller_output, &en_route_exchange,
+                     controller_output_route_exchange_handler);
 
     struct engine_arg engine_arg = {
         .sb_idl = ovnsb_idl_loop.idl,
@@ -5251,6 +5336,8 @@ main(int argc, char *argv[])
                                 sbrec_static_mac_binding_by_datapath);
     engine_ovsdb_node_add_index(&en_sb_chassis_template_var, "chassis",
                                 sbrec_chassis_template_var_index_by_chassis);
+    engine_ovsdb_node_add_index(&en_sb_route, "datapath",
+                                sbrec_route_index_by_datapath);
     engine_ovsdb_node_add_index(&en_ovs_flow_sample_collector_set, "id",
                                 ovsrec_flow_sample_collector_set_by_id);
     engine_ovsdb_node_add_index(&en_ovs_port, "qos", ovsrec_port_by_qos);
@@ -5911,6 +5998,7 @@ loop_done:
             ovsdb_idl_loop_commit_and_wait(&ovs_idl_loop);
             poll_block();
         }
+        route_exchange_cleanup();
     }
 
     free(ovn_version);
@@ -5940,6 +6028,7 @@ loop_done:
     service_stop();
     ovsrcu_exit();
     dns_resolve_destroy();
+    route_exchange_destroy();
 
     exit(retval);
 }

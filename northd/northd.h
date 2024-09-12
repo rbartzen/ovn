@@ -25,6 +25,7 @@
 #include "openvswitch/hmap.h"
 #include "simap.h"
 #include "ovs-thread.h"
+#include "en-lr-stateful.h"
 
 struct northd_input {
     /* Northbound table references */
@@ -64,6 +65,7 @@ struct northd_input {
     const struct chassis_features *features;
 
     /* Indexes */
+    struct ovsdb_idl_index *nbrec_lrp_by_name;
     struct ovsdb_idl_index *sbrec_chassis_by_name;
     struct ovsdb_idl_index *sbrec_chassis_by_hostname;
     struct ovsdb_idl_index *sbrec_ha_chassis_grp_by_name;
@@ -180,10 +182,14 @@ struct route_policy {
     bool stale;
 };
 
-struct static_routes_data {
+struct routes_data {
     struct hmap parsed_routes;
     struct simap route_tables;
     struct hmap bfd_active_connections;
+};
+
+struct routes_sync_data {
+    struct hmap parsed_routes;
 };
 
 struct route_policies_data {
@@ -371,6 +377,7 @@ struct ovn_datapath {
 
     struct ovn_port **localnet_ports;
     size_t n_localnet_ports;
+    size_t n_allocated_localnet_ports;
 
     struct ovs_list lr_list; /* In list of logical router datapaths. */
     /* The logical router group to which this datapath belongs.
@@ -661,6 +668,13 @@ struct ovn_port {
     /* Only used for the router type LSP whose peer is l3dgw_port */
     bool enable_router_port_acl;
 
+    /* Used for active-active port bindings to store the data they where
+     * generated from */
+    bool is_active_active;
+    char *aa_mac; // Only set on the lrp side
+    char *aa_chassis_name;
+    size_t aa_chassis_index;
+
     /* Reference of lflows generated for this ovn_port.
      *
      * This data is initialized and destroyed by the en_northd node, but
@@ -695,19 +709,54 @@ struct ovn_port {
     struct lflow_ref *stateful_lflow_ref;
 };
 
+enum route_source {
+    /* the route is directly connected to the logical router */
+    ROUTE_SOURCE_CONNECTED,
+    /* the route is derived from a northbound static route entry */
+    ROUTE_SOURCE_STATIC,
+    /* the route is learned by an ovn-controller */
+    ROUTE_SOURCE_LEARNED,
+};
+
 struct parsed_route {
     struct hmap_node key_node;
     struct in6_addr prefix;
     unsigned int plen;
+    struct in6_addr *nexthop; /* NULL for ROUTE_SOURCE_CONNECTED */
     bool is_src_route;
     uint32_t route_table_id;
     uint32_t hash;
-    const struct nbrec_logical_router_static_route *route;
     bool ecmp_symmetric_reply;
     bool is_discard_route;
-    const struct nbrec_logical_router *nbr;
+    const struct ovn_datapath *od;
     bool stale;
+    enum route_source source;
+    const struct ovsdb_idl_row *source_hint;
+    const char *lrp_addr_s;
+    const struct ovn_port *out_port;
 };
+
+struct parsed_route * parsed_route_clone(const struct parsed_route *pr);
+size_t parsed_route_hash(const struct parsed_route *pr);
+void parsed_route_free(struct parsed_route *pr);
+void parsed_route_add(const struct ovn_datapath *od,
+                      struct in6_addr *nexthop,
+                      const struct in6_addr prefix,
+                      unsigned int plen,
+                      bool is_discard_route,
+                      const char *lrp_addr_s,
+                      const struct ovn_port *out_port,
+                      uint32_t route_table_id,
+                      bool is_src_route,
+                      bool ecmp_symmetric_reply,
+                      enum route_source source,
+                      const struct ovsdb_idl_row *source_hint,
+                      struct hmap *routes);
+
+bool
+find_route_outport(const struct hmap *lr_ports, const char *output_port,
+                   const char *ip_prefix, const char *nexthop, bool is_ipv4,
+                   struct ovn_port **out_port, const char **lrp_addr_s);
 
 void ovnnb_db_run(struct northd_input *input_data,
                   struct northd_data *data,
@@ -732,12 +781,12 @@ void northd_indices_create(struct northd_data *data,
 
 void route_policies_init(struct route_policies_data *);
 void route_policies_destroy(struct route_policies_data *);
-void build_parsed_routes(struct ovn_datapath *, const struct hmap *,
+void build_parsed_routes(const struct ovn_datapath *, const struct hmap *,
                          const struct hmap *, struct hmap *, struct simap *,
                          struct hmap *);
 uint32_t get_route_table_id(struct simap *, const char *);
-void static_routes_init(struct static_routes_data *);
-void static_routes_destroy(struct static_routes_data *);
+void routes_init(struct routes_data *);
+void routes_destroy(struct routes_data *);
 
 void bfd_init(struct bfd_data *);
 void bfd_destroy(struct bfd_data *);
@@ -860,5 +909,23 @@ is_vxlan_mode(const struct smap *nb_options,
               const struct sbrec_chassis_table *sbrec_chassis_table);
 
 uint32_t get_ovn_max_dp_key_local(bool _vxlan_mode);
+
+/* Structure representing logical router port
+ * routable addresses. This includes DNAT and Load Balancer
+ * addresses. This structure will only be filled in if the
+ * router port is a gateway router port. Otherwise, all pointers
+ * will be NULL and n_addrs will be 0.
+ */
+struct ovn_port_routable_addresses {
+    /* The parsed routable addresses */
+    struct lport_addresses *laddrs;
+    /* Number of items in the laddrs array */
+    size_t n_addrs;
+};
+
+struct ovn_port_routable_addresses get_op_addresses(
+    struct ovn_port *op,
+    const struct lr_stateful_record *lr_stateful_rec,
+    bool routable_only);
 
 #endif /* NORTHD_H */

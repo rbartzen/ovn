@@ -803,6 +803,16 @@ normalize_v46_prefix(const struct in6_addr *prefix, unsigned int plen)
 }
 
 char *
+normalize_v46(const struct in6_addr *prefix)
+{
+    if (IN6_IS_ADDR_V4MAPPED(prefix)) {
+        return normalize_ipv4_prefix(in6_addr_get_mapped_ipv4(prefix), 32);
+    } else {
+        return normalize_ipv6_prefix(prefix, 128);
+    }
+}
+
+char *
 str_tolower(const char *orig)
 {
     char *copy = xmalloc(strlen(orig) + 1);
@@ -1062,6 +1072,94 @@ get_chassis_external_id_value_bool(const struct smap *external_ids,
                       smap_get_bool(external_ids, option_key, def));
     free(chassis_key);
     return ret;
+}
+
+bool 
+chassis_find_aa_networks(const struct sbrec_chassis *chassis,
+                         const char* network_name,
+                         struct chassis_aa_network* chassis_aa_network) {
+    memset(chassis_aa_network, 0, sizeof *chassis_aa_network);
+
+    const char* aa_ports = smap_get(&chassis->other_config, "ovn-aa-port-mappings");
+    bool found = false;
+    char *curnet, *nextnet, *curport, *nextport, *start;
+
+    // Structure
+    // ovn-aa-port-mappings="<network>|<network>"
+    // network="<network_name>;<port>;<port>"
+    // port="<mac>,<ip>"
+    nextnet = start = xstrdup(aa_ports);
+    while ((curnet = strsep(&nextnet, "|")) && *curnet) {
+        nextport = curnet;
+        char* network = strsep(&nextport, ";");
+        if (strcmp(network, network_name)) {
+            continue;
+        }
+        found = true;
+        chassis_aa_network->network_name = xstrdup(network);
+        chassis_aa_network->n_addresses = 0;
+        while ((curport = strsep(&nextport, ";")) && *curport) {
+            char *mac, *ip;
+
+            mac = strsep(&curport, ",");
+            ip = curport;
+
+            if (!mac || !ip || !*mac || !*ip) {
+                VLOG_ERR("Invalid format for ovn-aa-port-mappings '%s'",
+                         aa_ports);
+                continue;
+            }
+
+            chassis_aa_network->addresses = xrealloc(chassis_aa_network->addresses,
+                (chassis_aa_network->n_addresses + 1) * sizeof *chassis_aa_network->addresses);
+            struct lport_addresses* address =
+                &chassis_aa_network->addresses[chassis_aa_network->n_addresses];
+            init_lport_addresses(address);
+
+            if (!eth_addr_from_string(mac, &address->ea)) {
+                VLOG_ERR("Invalid mac address in ovn-aa-port-mappings '%s'",
+                         aa_ports);
+                free(address);
+                continue;
+            }
+            snprintf(address->ea_s, sizeof address->ea_s, ETH_ADDR_FMT,
+                     ETH_ADDR_ARGS(address->ea));
+
+            ovs_be32 ip4;
+            struct in6_addr ip6;
+            unsigned int plen;
+            char *error;
+
+            error = ip_parse_cidr(ip, &ip4, &plen);
+            if (!error) {
+                if (!ip4) {
+                    VLOG_ERR("Invalid ip address in ovn-aa-port-mappings '%s'",
+                             aa_ports);
+                    destroy_lport_addresses(address);
+                    continue;
+                }
+
+                add_ipv4_netaddr(address, ip4, plen);
+            } else {
+                free(error);
+
+                error = ipv6_parse_cidr(ip, &ip6, &plen);
+                if (!error) {
+                    add_ipv6_netaddr(address, ip6, plen);
+                } else {
+                    VLOG_ERR("Invalid ip address in ovn-aa-port-mappings '%s'",
+                             aa_ports);
+                    destroy_lport_addresses(address);
+                    free(error);
+                    continue;
+                }
+            }
+            chassis_aa_network->n_addresses++;
+        }
+    }
+
+    free(start);
+    return found;
 }
 
 void flow_collector_ids_init(struct flow_collector_ids *ids)
@@ -1330,4 +1428,91 @@ ovn_update_swconn_at(struct rconn *swconn, const char *target,
     }
 
     return notify;
+}
+
+/* Extracts the mac, IPv4 and IPv6 addresses, and logical port from
+ * 'addresses' which should be of the format 'MAC [IP1 IP2 ..]
+ * [is_chassis_resident("LPORT_NAME")]', where IPn should be a valid IPv4
+ * or IPv6 address, and stores them in the 'ipv4_addrs' and 'ipv6_addrs'
+ * fields of 'laddrs'.  The logical port name is stored in 'lport'.
+ *
+ * Returns true if at least 'MAC' is found in 'address', false otherwise.
+ *
+ * The caller must call destroy_lport_addresses() and free(*lport). */
+bool
+extract_addresses_with_port(const char *addresses,
+                            struct lport_addresses *laddrs,
+                            char **lport)
+{
+    int ofs;
+    if (!extract_addresses(addresses, laddrs, &ofs)) {
+        return false;
+    } else if (!addresses[ofs]) {
+        return true;
+    }
+
+    struct lexer lexer;
+    lexer_init(&lexer, addresses + ofs);
+    lexer_get(&lexer);
+
+    if (lexer.error || lexer.token.type != LEX_T_ID
+        || !lexer_match_id(&lexer, "is_chassis_resident")) {
+        static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 1);
+        VLOG_INFO_RL(&rl, "invalid syntax '%s' in address", addresses);
+        lexer_destroy(&lexer);
+        return true;
+    }
+
+    if (!lexer_match(&lexer, LEX_T_LPAREN)) {
+        static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 1);
+        VLOG_INFO_RL(&rl, "Syntax error: expecting '(' after "
+                          "'is_chassis_resident' in address '%s'", addresses);
+        lexer_destroy(&lexer);
+        return false;
+    }
+
+    if (lexer.token.type != LEX_T_STRING) {
+        static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 1);
+        VLOG_INFO_RL(&rl,
+                    "Syntax error: expecting quoted string after "
+                    "'is_chassis_resident' in address '%s'", addresses);
+        lexer_destroy(&lexer);
+        return false;
+    }
+
+    *lport = xstrdup(lexer.token.s);
+
+    lexer_get(&lexer);
+    if (!lexer_match(&lexer, LEX_T_RPAREN)) {
+        static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 1);
+        VLOG_INFO_RL(&rl, "Syntax error: expecting ')' after quoted string in "
+                          "'is_chassis_resident()' in address '%s'",
+                          addresses);
+        lexer_destroy(&lexer);
+        return false;
+    }
+
+    lexer_destroy(&lexer);
+    return true;
+}
+
+bool
+prefix_is_link_local(const struct in6_addr *prefix, unsigned int plen)
+{
+    if (IN6_IS_ADDR_V4MAPPED(prefix)) {
+        /* Link local range is "169.254.0.0/16". */
+        if (plen < 16) {
+            return false;
+        }
+        ovs_be32 lla;
+        inet_pton(AF_INET, "169.254.0.0", &lla);
+        return ((in6_addr_get_mapped_ipv4(prefix) & htonl(0xffff0000)) == lla);
+    }
+
+    /* ipv6, link local range is "fe80::/10". */
+    if (plen < 10) {
+        return false;
+    }
+    return (((prefix->s6_addr[0] & 0xff) == 0xfe) &&
+            ((prefix->s6_addr[1] & 0xc0) == 0x80));
 }

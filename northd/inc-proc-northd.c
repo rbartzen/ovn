@@ -19,6 +19,7 @@
 #include <stdio.h>
 
 #include "chassis-index.h"
+#include "lrp-index.h"
 #include "ip-mcast-index.h"
 #include "static-mac-binding-index.h"
 #include "lib/inc-proc-eng.h"
@@ -42,6 +43,7 @@
 #include "en-sampling-app.h"
 #include "en-sync-sb.h"
 #include "en-sync-from-sb.h"
+#include "en-routes-sync.h"
 #include "unixctl.h"
 #include "util.h"
 
@@ -103,7 +105,8 @@ static unixctl_cb_func chassis_features_list;
     SB_NODE(fdb, "fdb") \
     SB_NODE(static_mac_binding, "static_mac_binding") \
     SB_NODE(chassis_template_var, "chassis_template_var") \
-    SB_NODE(logical_dp_group, "logical_dp_group")
+    SB_NODE(logical_dp_group, "logical_dp_group") \
+    SB_NODE(route, "route")
 
 enum sb_engine_node {
 #define SB_NODE(NAME, NAME_STR) SB_##NAME,
@@ -159,9 +162,10 @@ static ENGINE_NODE_WITH_CLEAR_TRACK_DATA(lr_nat, "lr_nat");
 static ENGINE_NODE_WITH_CLEAR_TRACK_DATA(lr_stateful, "lr_stateful");
 static ENGINE_NODE_WITH_CLEAR_TRACK_DATA(ls_stateful, "ls_stateful");
 static ENGINE_NODE(route_policies, "route_policies");
-static ENGINE_NODE(static_routes, "static_routes");
+static ENGINE_NODE(routes, "routes");
 static ENGINE_NODE(bfd, "bfd");
 static ENGINE_NODE(bfd_sync, "bfd_sync");
+static ENGINE_NODE(routes_sync, "routes_sync");
 
 void inc_proc_northd_init(struct ovsdb_idl_loop *nb,
                           struct ovsdb_idl_loop *sb)
@@ -254,15 +258,20 @@ void inc_proc_northd_init(struct ovsdb_idl_loop *nb,
     engine_add_input(&en_route_policies, &en_northd,
                      route_policies_northd_change_handler);
 
-    engine_add_input(&en_static_routes, &en_bfd, NULL);
-    engine_add_input(&en_static_routes, &en_northd,
-                     static_routes_northd_change_handler);
+    engine_add_input(&en_routes, &en_bfd, NULL);
+    engine_add_input(&en_routes, &en_northd,
+                     routes_northd_change_handler);
 
     engine_add_input(&en_bfd_sync, &en_bfd, NULL);
     engine_add_input(&en_bfd_sync, &en_nb_bfd, NULL);
-    engine_add_input(&en_bfd_sync, &en_static_routes, NULL);
+    engine_add_input(&en_bfd_sync, &en_routes, NULL);
     engine_add_input(&en_bfd_sync, &en_route_policies, NULL);
     engine_add_input(&en_bfd_sync, &en_northd, bfd_sync_northd_change_handler);
+
+    engine_add_input(&en_routes_sync, &en_routes, NULL);
+    engine_add_input(&en_routes_sync, &en_sb_route, NULL);
+    engine_add_input(&en_routes_sync, &en_northd, NULL);
+    engine_add_input(&en_routes_sync, &en_lr_stateful, NULL);
 
     engine_add_input(&en_sync_meters, &en_nb_acl, NULL);
     engine_add_input(&en_sync_meters, &en_nb_meter, NULL);
@@ -276,7 +285,8 @@ void inc_proc_northd_init(struct ovsdb_idl_loop *nb,
     engine_add_input(&en_lflow, &en_sb_logical_dp_group, NULL);
     engine_add_input(&en_lflow, &en_bfd_sync, NULL);
     engine_add_input(&en_lflow, &en_route_policies, NULL);
-    engine_add_input(&en_lflow, &en_static_routes, NULL);
+    engine_add_input(&en_lflow, &en_routes, NULL);
+    engine_add_input(&en_lflow, &en_routes_sync, NULL);
     engine_add_input(&en_lflow, &en_global_config,
                      node_global_config_handler);
 
@@ -349,6 +359,8 @@ void inc_proc_northd_init(struct ovsdb_idl_loop *nb,
         .sb_idl = sb->idl,
     };
 
+    struct ovsdb_idl_index *nbrec_lrp_by_name =
+                         lrp_index_create(nb->idl);
     struct ovsdb_idl_index *sbrec_chassis_by_name =
                          chassis_index_create(sb->idl);
     struct ovsdb_idl_index *sbrec_ha_chassis_grp_by_name =
@@ -368,6 +380,9 @@ void inc_proc_northd_init(struct ovsdb_idl_loop *nb,
 
     engine_init(&en_northd_output, &engine_arg);
 
+    engine_ovsdb_node_add_index(&en_nb_logical_router,
+                                "nbrec_lrp_by_name",
+                                nbrec_lrp_by_name);
     engine_ovsdb_node_add_index(&en_sb_chassis,
                                 "sbrec_chassis_by_name",
                                 sbrec_chassis_by_name);
