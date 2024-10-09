@@ -40,6 +40,27 @@ m4_define([M_START_TCPDUMP],
     ]
 )
 
+# M_EXEC([fake_node], [command])
+#
+# Execute 'command' in 'fakenode'
+m4_define([M_EXEC],
+    [podman exec $1 $2])
+
+# M_CHECK_EXEC([fake_node], [command], other_params...)
+#
+# Wrapper for AT_CHECK that executes 'command' inside 'fake_node''s'.
+# 'other_params' as passed as they are to AT_CHECK.
+m4_define([M_CHECK_EXEC],
+    [ AT_CHECK([M_EXEC([$1], [$2])], m4_shift(m4_shift(m4_shift($@)))) ]
+)
+
+# M_FORMAT_CT([ip-addr])
+#
+# Strip content from the piped input which would differ from test to test
+# and limit the output to the rows containing 'ip-addr'.
+#
+m4_define([M_FORMAT_CT],
+    [[grep -F "dst=$1," | sed -e 's/id=[0-9]*/id=<cleared>/g' -e 's/state=[0-9_A-Z]*/state=<cleared>/g' | sort | uniq | sed -e 's/zone=[[0-9]]*/zone=<cleared>/' -e 's/mark=[[0-9]]*/mark=<cleared>/' ]])
 
 OVS_START_SHELL_HELPERS
 
@@ -74,6 +95,25 @@ cleanup_multinode_resources() {
 
 multinode_nbctl () {
     m_as ovn-central ovn-nbctl "$@"
+}
+
+check_fake_multinode_setup_by_nodes() {
+    check m_as ovn-central ovn-nbctl --wait=sb sync
+    for c in $1
+    do
+        AT_CHECK([m_as $c ovn-appctl -t ovn-controller version], [0], [ignore])
+    done
+}
+
+cleanup_multinode_resources_by_nodes() {
+    m_as ovn-central rm -f /etc/ovn/ovnnb_db.db
+    m_as ovn-central /usr/share/ovn/scripts/ovn-ctl restart_northd
+    check m_as ovn-central ovn-nbctl --wait=sb sync
+    for c in $1
+    do
+        m_as $c ovs-vsctl del-br br-int
+        m_as $c ip --all netns delete
+    done
 }
 
 # m_count_rows TABLE [CONDITION...]

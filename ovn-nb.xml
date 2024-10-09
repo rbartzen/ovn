@@ -2302,6 +2302,16 @@ or
         local anymore by the ovn-controller. This option is set to
         <code>false</code> by default.
       </column>
+
+      <column name="options" key="use_stateless_nat"
+              type='{"type": "boolean"}'>
+        If the load balancer is configured with <code>use_stateless_nat</code>
+        option to <code>true</code>, the logical router that references this
+        load balancer will use Stateless NAT rules when the logical router
+        has multiple distributed gateway ports(DGP). Otherwise, the outbound
+        traffic may be dropped in scenarios where we have different chassis
+        for each DGP. This option is set to <code>false</code> by default.
+      </column>
     </group>
   </table>
 
