@@ -1600,6 +1600,12 @@ check_fake_multinode_setup_by_nodes 'ovn-chassis-1 ovn-chassis-2 ovn-chassis-3 o
 # Delete the multinode NB and OVS resources before starting the test.
 cleanup_multinode_resources_by_nodes 'ovn-chassis-1 ovn-chassis-2 ovn-chassis-3 ovn-chassis-4 ovn-gw-1 ovn-gw-2'
 
+# Reset geneve tunnels
+for c in ovn-chassis-1 ovn-chassis-2 ovn-chassis-3 ovn-chassis-4 ovn-gw-1 ovn-gw-2
+do
+    m_as $c ovs-vsctl set open . external-ids:ovn-encap-type=geneve
+done
+
 # Network topology
 #
 #             publicp1 (ovn-chassis-3) (20.0.1.3/24)
@@ -1610,9 +1616,9 @@ cleanup_multinode_resources_by_nodes 'ovn-chassis-1 ovn-chassis-2 ovn-chassis-3 
 #                |
 #                |
 #                |
-#               lr0 ------- sw0 --- sw0p11 (ovn-chassis-1) 10.0.1.3/24
+#               lr0 ------- sw0 --- sw0p1 (ovn-chassis-1) 10.0.1.3/24
 #                |           |
-#                |           + ---  sw0p12 (ovn-chassis-2) 10.0.1.4/24
+#                |           + ---  sw0p2 (ovn-chassis-2) 10.0.1.4/24
 #                |
 #      DGP public2 (ovn-gw-2) (30.0.1.1/24)
 #                |
@@ -1621,10 +1627,12 @@ cleanup_multinode_resources_by_nodes 'ovn-chassis-1 ovn-chassis-2 ovn-chassis-3 
 #             publicp2 (ovn-chassis-4) (30.0.1.3/24)
 
 # Delete already used ovs-ports
-m_as ovn-chassis-1 ovs-vsctl del-port br-int sw0p11-p
-m_as ovn-chassis-2 ovs-vsctl del-port br-int sw0p12-p
-m_as ovn-chassis-1 ip link del sw0p11-p
-m_as ovn-chassis-2 ip link del sw0p12-p
+m_as ovn-chassis-1 ovs-vsctl del-port br-int sw0p1-p
+m_as ovn-chassis-2 ovs-vsctl del-port br-int sw0p2-p
+m_as ovn-chassis-2 ovs-vsctl del-port br-int sw1p1-p
+m_as ovn-chassis-1 ip link del sw0p1-p
+m_as ovn-chassis-2 ip link del sw0p2-p
+m_as ovn-chassis-2 ip link del sw1p1-p
 m_as ovn-chassis-3 ovs-vsctl del-port br-int publicp1-p
 m_as ovn-chassis-4 ovs-vsctl del-port br-int publicp2-p
 m_as ovn-chassis-3 ip link del publicp1-p
@@ -1632,22 +1640,22 @@ m_as ovn-chassis-4 ip link del publicp2-p
 
 # Create East-West switch for LB backends
 check multinode_nbctl ls-add sw0
-check multinode_nbctl lsp-add sw0 sw0-port11
-check multinode_nbctl lsp-set-addresses sw0-port11 "50:54:00:00:00:03 10.0.1.3 1000::3"
-check multinode_nbctl lsp-add sw0 sw0-port12
-check multinode_nbctl lsp-set-addresses sw0-port12 "50:54:00:00:00:04 10.0.1.4 1000::4"
+check multinode_nbctl lsp-add sw0 sw0-port1
+check multinode_nbctl lsp-set-addresses sw0-port1 "50:54:00:00:00:03 10.0.1.3 1000::3"
+check multinode_nbctl lsp-add sw0 sw0-port2
+check multinode_nbctl lsp-set-addresses sw0-port2 "50:54:00:00:00:04 10.0.1.4 1000::4"
 
-m_as ovn-chassis-1 /data/create_fake_vm.sh sw0-port11 sw0p11 50:54:00:00:00:03 1342 10.0.1.3 24 10.0.1.1 1000::3/64 1000::a
-m_as ovn-chassis-2 /data/create_fake_vm.sh sw0-port12 sw0p12 50:54:00:00:00:04 1342 10.0.1.4 24 10.0.1.1 1000::4/64 1000::a
+m_as ovn-chassis-1 /data/create_fake_vm.sh sw0-port1 sw0p1 50:54:00:00:00:03 1342 10.0.1.3 24 10.0.1.1 1000::3/64 1000::a
+m_as ovn-chassis-2 /data/create_fake_vm.sh sw0-port2 sw0p2 50:54:00:00:00:04 1342 10.0.1.4 24 10.0.1.1 1000::4/64 1000::a
 
 m_wait_for_ports_up
 
-M_NS_CHECK_EXEC([ovn-chassis-1], [sw0p11], [ping -q -c 3 -i 0.3 -w 2 10.0.1.4 | FORMAT_PING], \
+M_NS_CHECK_EXEC([ovn-chassis-1], [sw0p1], [ping -q -c 3 -i 0.3 -w 2 10.0.1.4 | FORMAT_PING], \
 [0], [dnl
 3 packets transmitted, 3 received, 0% packet loss, time 0ms
 ])
 
-M_NS_CHECK_EXEC([ovn-chassis-2], [sw0p12], [ping -q -c 3 -i 0.3 -w 2 10.0.1.3 | FORMAT_PING], \
+M_NS_CHECK_EXEC([ovn-chassis-2], [sw0p2], [ping -q -c 3 -i 0.3 -w 2 10.0.1.3 | FORMAT_PING], \
 [0], [dnl
 3 packets transmitted, 3 received, 0% packet loss, time 0ms
 ])
@@ -1700,11 +1708,6 @@ m_as ovn-chassis-3 /data/create_fake_vm.sh public-port1 publicp1 40:54:00:00:00:
 
 m_wait_for_ports_up public-port1
 
-M_NS_CHECK_EXEC([ovn-chassis-3], [publicp1], [ping -q -c 3 -i 0.3 -w 2 20.0.1.1 | FORMAT_PING], \
-[0], [dnl
-3 packets transmitted, 3 received, 0% packet loss, time 0ms
-])
-
 # Create the external LR0 port to the DGP public2
 check multinode_nbctl lsp-add public public-port2
 check multinode_nbctl lsp-set-addresses public-port2 "60:54:00:00:00:03 30.0.1.3 3000::3"
@@ -1721,21 +1724,16 @@ m_as ovn-chassis-4 /data/create_fake_vm.sh public-port2 publicp2 60:54:00:00:00:
 
 m_wait_for_ports_up public-port2
 
-M_NS_CHECK_EXEC([ovn-chassis-4], [publicp2], [ping -q -c 3 -i 0.3 -w 2 30.0.1.1 | FORMAT_PING], \
-[0], [dnl
-3 packets transmitted, 3 received, 0% packet loss, time 0ms
-])
-
 # Add SNAT rules using gateway-port
 check multinode_nbctl --gateway-port lr0-public-p1 lr-nat-add lr0 snat 20.0.1.1 10.0.1.0/24
 check multinode_nbctl --gateway-port lr0-public-p2 lr-nat-add lr0 snat 30.0.1.1 10.0.1.0/24
 
-M_NS_CHECK_EXEC([ovn-chassis-1], [sw0p11], [ping -q -c 3 -i 0.3 -w 2 20.0.1.3 | FORMAT_PING], \
+M_NS_CHECK_EXEC([ovn-chassis-1], [sw0p1], [ping -q -c 3 -i 0.3 -w 2 20.0.1.3 | FORMAT_PING], \
 [0], [dnl
 3 packets transmitted, 3 received, 0% packet loss, time 0ms
 ])
 
-M_NS_CHECK_EXEC([ovn-chassis-2], [sw0p12], [ping -q -c 3 -i 0.3 -w 2 30.0.1.3 | FORMAT_PING], \
+M_NS_CHECK_EXEC([ovn-chassis-2], [sw0p2], [ping -q -c 3 -i 0.3 -w 2 30.0.1.3 | FORMAT_PING], \
 [0], [dnl
 3 packets transmitted, 3 received, 0% packet loss, time 0ms
 ])
@@ -1749,12 +1747,12 @@ check multinode_nbctl ls-lb-add sw0 lb0
 check multinode_nbctl set load_balancer lb0 options:use_stateless_nat=true
 
 # Start backend http services
-M_NS_DAEMONIZE([ovn-chassis-1], [sw0p11], [python3 -m http.server --bind 10.0.1.3 80 >/dev/null 2>&1], [http1.pid])
-M_NS_DAEMONIZE([ovn-chassis-2], [sw0p12], [python3 -m http.server --bind 10.0.1.4 80 >/dev/null 2>&1], [http2.pid])
+M_NS_DAEMONIZE([ovn-chassis-1], [sw0p1], [python3 -m http.server --bind 10.0.1.3 80 >/dev/null 2>&1], [http1.pid])
+M_NS_DAEMONIZE([ovn-chassis-2], [sw0p2], [python3 -m http.server --bind 10.0.1.4 80 >/dev/null 2>&1], [http2.pid])
 
 # wait for http server be ready
-OVS_WAIT_UNTIL([m_as ovn-chassis-1 ip netns exec sw0p11 ss -tulpn | grep LISTEN | grep 10.0.1.3:80])
-OVS_WAIT_UNTIL([m_as ovn-chassis-2 ip netns exec sw0p12 ss -tulpn | grep LISTEN | grep 10.0.1.4:80])
+OVS_WAIT_UNTIL([m_as ovn-chassis-1 ip netns exec sw0p1 ss -tulpn | grep LISTEN | grep 10.0.1.3:80])
+OVS_WAIT_UNTIL([m_as ovn-chassis-2 ip netns exec sw0p2 ss -tulpn | grep LISTEN | grep 10.0.1.4:80])
 
 # Flush conntrack entries for easier output parsing of next test.
 m_as ovn-gw-1 ovs-appctl dpctl/flush-conntrack
@@ -1790,8 +1788,8 @@ tcp,orig=(src=30.0.1.3,dst=<cleared>,sport=59000,dport=80),reply=(src=<cleared>,
 ])
 
 # create a big file on web servers for download
-M_NS_EXEC([ovn-chassis-1], [sw0p11], [dd bs=512 count=200000 if=/dev/urandom of=download_file])
-M_NS_EXEC([ovn-chassis-2], [sw0p12], [dd bs=512 count=200000 if=/dev/urandom of=download_file])
+M_NS_EXEC([ovn-chassis-1], [sw0p1], [dd bs=512 count=200000 if=/dev/urandom of=download_file])
+M_NS_EXEC([ovn-chassis-2], [sw0p2], [dd bs=512 count=200000 if=/dev/urandom of=download_file])
 
 # Flush conntrack entries for easier output parsing of next test.
 m_as ovn-chassis-1 ovs-appctl dpctl/flush-conntrack
@@ -2135,6 +2133,12 @@ check_fake_multinode_setup_by_nodes 'ovn-chassis-1 ovn-chassis-2 ovn-chassis-3 o
 # Delete the multinode NB and OVS resources before starting the test.
 cleanup_multinode_resources_by_nodes 'ovn-chassis-1 ovn-chassis-2 ovn-chassis-3 ovn-gw-1 ovn-gw-2 ovn-gw-3 ovn-gw-4'
 
+# Reset geneve tunnels
+for c in ovn-chassis-1 ovn-chassis-2 ovn-chassis-3 ovn-gw-1 ovn-gw-2 ovn-gw-3 ovn-gw-4
+do
+    m_as $c ovs-vsctl set open . external-ids:ovn-encap-type=geneve
+done
+
 # Network topology
 #                                      VM ovn-chassis-3 (40.0.2.3/24)
 #                                                   |
@@ -2161,26 +2165,28 @@ cleanup_multinode_resources_by_nodes 'ovn-chassis-1 ovn-chassis-2 ovn-chassis-3 
 #                                                   |
 #                     +.............................+.............................+
 #                     |                                                           |
-#    sw0p21 (ovn-chassis-1) 10.0.2.3/24                         sw0p22 (ovn-chassis-2) 10.0.2.4/24
+#      sw0p1 (ovn-chassis-1) 10.0.2.3/24                         sw0p2 (ovn-chassis-2) 10.0.2.4/24
 
 
 # Delete already used ovs-ports
-m_as ovn-chassis-1 ovs-vsctl del-port br-int sw0p21-p
-m_as ovn-chassis-2 ovs-vsctl del-port br-int sw0p22-p
-m_as ovn-chassis-1 ip link del sw0p21-p
-m_as ovn-chassis-2 ip link del sw0p22-p
+m_as ovn-chassis-1 ovs-vsctl del-port br-int sw0p1-p
+m_as ovn-chassis-2 ovs-vsctl del-port br-int sw0p2-p
+m_as ovn-chassis-2 ovs-vsctl del-port br-int sw1p1-p
 m_as ovn-chassis-3 ovs-vsctl del-port br-int sw1p1-p
+m_as ovn-chassis-1 ip link del sw0p1-p
+m_as ovn-chassis-2 ip link del sw0p2-p
+m_as ovn-chassis-2 ip link del sw1p1-p
 m_as ovn-chassis-3 ip link del sw1p1-p
 
 # Create East-West switch for LB backends
 check multinode_nbctl ls-add sw0
-check multinode_nbctl lsp-add sw0 sw0-port21
-check multinode_nbctl lsp-set-addresses sw0-port21 "50:54:00:00:00:03 10.0.2.3 1000::3"
-check multinode_nbctl lsp-add sw0 sw0-port22
-check multinode_nbctl lsp-set-addresses sw0-port22 "50:54:00:00:00:04 10.0.2.4 1000::4"
+check multinode_nbctl lsp-add sw0 sw0-port1
+check multinode_nbctl lsp-set-addresses sw0-port1 "50:54:00:00:00:03 10.0.2.3 1000::3"
+check multinode_nbctl lsp-add sw0 sw0-port2
+check multinode_nbctl lsp-set-addresses sw0-port2 "50:54:00:00:00:04 10.0.2.4 1000::4"
 
-m_as ovn-chassis-1 /data/create_fake_vm.sh sw0-port21 sw0p21 50:54:00:00:00:03 1342 10.0.2.3 24 10.0.2.1 1000::3/64 1000::a
-m_as ovn-chassis-2 /data/create_fake_vm.sh sw0-port22 sw0p22 50:54:00:00:00:04 1342 10.0.2.4 24 10.0.2.1 1000::4/64 1000::a
+m_as ovn-chassis-1 /data/create_fake_vm.sh sw0-port1 sw0p1 50:54:00:00:00:03 1342 10.0.2.3 24 10.0.2.1 1000::3/64 1000::a
+m_as ovn-chassis-2 /data/create_fake_vm.sh sw0-port2 sw0p2 50:54:00:00:00:04 1342 10.0.2.4 24 10.0.2.1 1000::4/64 1000::a
 
 # Create sw1 for ovn-chassis-3 VM
 check multinode_nbctl ls-add sw1
@@ -2191,12 +2197,12 @@ m_as ovn-chassis-3 /data/create_fake_vm.sh sw1-port1 sw1p1 70:54:00:00:00:03 134
 
 m_wait_for_ports_up
 
-M_NS_CHECK_EXEC([ovn-chassis-1], [sw0p21], [ping -q -c 3 -i 0.3 -w 2 10.0.2.4 | FORMAT_PING], \
+M_NS_CHECK_EXEC([ovn-chassis-1], [sw0p1], [ping -q -c 3 -i 0.3 -w 2 10.0.2.4 | FORMAT_PING], \
 [0], [dnl
 3 packets transmitted, 3 received, 0% packet loss, time 0ms
 ])
 
-M_NS_CHECK_EXEC([ovn-chassis-2], [sw0p22], [ping -q -c 3 -i 0.3 -w 2 10.0.2.3 | FORMAT_PING], \
+M_NS_CHECK_EXEC([ovn-chassis-2], [sw0p2], [ping -q -c 3 -i 0.3 -w 2 10.0.2.3 | FORMAT_PING], \
 [0], [dnl
 3 packets transmitted, 3 received, 0% packet loss, time 0ms
 ])
@@ -2238,7 +2244,9 @@ check multinode_nbctl lsp-set-addresses public-lr0-p1 router
 check multinode_nbctl lsp-set-options public-lr0-p1 router-port=lr0-public-p1
 check multinode_nbctl lrp-set-gateway-chassis lr0-public-p1 ovn-gw-1 10
 
-M_NS_CHECK_EXEC([ovn-chassis-1], [sw0p21], [ping -q -c 3 -i 0.3 -w 2 20.0.2.1 | FORMAT_PING], \
+m_wait_for_ports_up
+
+M_NS_CHECK_EXEC([ovn-chassis-1], [sw0p1], [ping -q -c 3 -i 0.3 -w 2 20.0.2.1 | FORMAT_PING], \
 [0], [dnl
 3 packets transmitted, 3 received, 0% packet loss, time 0ms
 ])
@@ -2250,7 +2258,7 @@ check multinode_nbctl lsp-set-addresses public-lr0-p2 router
 check multinode_nbctl lsp-set-options public-lr0-p2 router-port=lr0-public-p2
 check multinode_nbctl lrp-set-gateway-chassis lr0-public-p2 ovn-gw-2 10
 
-M_NS_CHECK_EXEC([ovn-chassis-2], [sw0p22], [ping -q -c 3 -i 0.3 -w 2 20.0.2.2 | FORMAT_PING], \
+M_NS_CHECK_EXEC([ovn-chassis-2], [sw0p2], [ping -q -c 3 -i 0.3 -w 2 20.0.2.2 | FORMAT_PING], \
 [0], [dnl
 3 packets transmitted, 3 received, 0% packet loss, time 0ms
 ])
@@ -2339,16 +2347,16 @@ check multinode_nbctl --ecmp lr-route-add lr0 0.0.0.0/0 20.0.2.4
 check multinode_nbctl --ecmp lr-route-add lr1 0.0.0.0/0 20.0.2.2
 
 # Start backend http services
-M_NS_DAEMONIZE([ovn-chassis-1], [sw0p21], [python3 -m http.server --bind 10.0.2.3 80 >/dev/null 2>&1], [http1.pid])
-M_NS_DAEMONIZE([ovn-chassis-2], [sw0p22], [python3 -m http.server --bind 10.0.2.4 80 >/dev/null 2>&1], [http2.pid])
+M_NS_DAEMONIZE([ovn-chassis-1], [sw0p1], [python3 -m http.server --bind 10.0.2.3 80 >/dev/null 2>&1], [http1.pid])
+M_NS_DAEMONIZE([ovn-chassis-2], [sw0p2], [python3 -m http.server --bind 10.0.2.4 80 >/dev/null 2>&1], [http2.pid])
 
 # wait for http server be ready
-OVS_WAIT_UNTIL([m_as ovn-chassis-1 ip netns exec sw0p21 ss -tulpn | grep LISTEN | grep 10.0.2.3:80])
-OVS_WAIT_UNTIL([m_as ovn-chassis-2 ip netns exec sw0p22 ss -tulpn | grep LISTEN | grep 10.0.2.4:80])
+OVS_WAIT_UNTIL([m_as ovn-chassis-1 ip netns exec sw0p1 ss -tulpn | grep LISTEN | grep 10.0.2.3:80])
+OVS_WAIT_UNTIL([m_as ovn-chassis-2 ip netns exec sw0p2 ss -tulpn | grep LISTEN | grep 10.0.2.4:80])
 
 # create a big file on web servers for download
-M_NS_EXEC([ovn-chassis-1], [sw0p21], [dd bs=512 count=200000 if=/dev/urandom of=download_file])
-M_NS_EXEC([ovn-chassis-2], [sw0p22], [dd bs=512 count=200000 if=/dev/urandom of=download_file])
+M_NS_EXEC([ovn-chassis-1], [sw0p1], [dd bs=512 count=200000 if=/dev/urandom of=download_file])
+M_NS_EXEC([ovn-chassis-2], [sw0p2], [dd bs=512 count=200000 if=/dev/urandom of=download_file])
 
 # create LB
 check multinode_nbctl lb-add lb0 "172.16.0.100:80" "10.0.2.3:80,10.0.2.4:80"
@@ -2514,12 +2522,12 @@ timed out
 ])
 
 # Start backend http services using different ports from the LB config - check connectivity
-M_NS_DAEMONIZE([ovn-chassis-1], [sw0p21], [python3 -m http.server --bind 10.0.2.3 8080 >/dev/null 2>&1], [http3.pid])
-M_NS_DAEMONIZE([ovn-chassis-2], [sw0p22], [python3 -m http.server --bind 10.0.2.4 8080 >/dev/null 2>&1], [http4.pid])
+M_NS_DAEMONIZE([ovn-chassis-1], [sw0p1], [python3 -m http.server --bind 10.0.2.3 8080 >/dev/null 2>&1], [http3.pid])
+M_NS_DAEMONIZE([ovn-chassis-2], [sw0p2], [python3 -m http.server --bind 10.0.2.4 8080 >/dev/null 2>&1], [http4.pid])
 
 # wait for http server be ready
-OVS_WAIT_UNTIL([m_as ovn-chassis-1 ip netns exec sw0p21 ss -tulpn | grep LISTEN | grep 10.0.2.3:8080])
-OVS_WAIT_UNTIL([m_as ovn-chassis-2 ip netns exec sw0p22 ss -tulpn | grep LISTEN | grep 10.0.2.4:8080])
+OVS_WAIT_UNTIL([m_as ovn-chassis-1 ip netns exec sw0p1 ss -tulpn | grep LISTEN | grep 10.0.2.3:8080])
+OVS_WAIT_UNTIL([m_as ovn-chassis-2 ip netns exec sw0p2 ss -tulpn | grep LISTEN | grep 10.0.2.4:8080])
 
 # Flush conntrack entries for easier output parsing of next test.
 m_as ovn-gw-1 ovs-appctl dpctl/flush-conntrack
