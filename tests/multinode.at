@@ -1627,14 +1627,9 @@ done
 #             publicp2 (ovn-chassis-4) (30.0.1.3/24)
 
 # Delete already used ovs-ports
-m_as ovn-chassis-1 ovs-vsctl del-port br-int sw0p1-p
-m_as ovn-chassis-2 ovs-vsctl del-port br-int sw0p2-p
-m_as ovn-chassis-2 ovs-vsctl del-port br-int sw1p1-p
 m_as ovn-chassis-1 ip link del sw0p1-p
 m_as ovn-chassis-2 ip link del sw0p2-p
 m_as ovn-chassis-2 ip link del sw1p1-p
-m_as ovn-chassis-3 ovs-vsctl del-port br-int publicp1-p
-m_as ovn-chassis-4 ovs-vsctl del-port br-int publicp2-p
 m_as ovn-chassis-3 ip link del publicp1-p
 m_as ovn-chassis-4 ip link del publicp2-p
 
@@ -1794,6 +1789,8 @@ M_NS_EXEC([ovn-chassis-2], [sw0p2], [dd bs=512 count=200000 if=/dev/urandom of=d
 # Flush conntrack entries for easier output parsing of next test.
 m_as ovn-chassis-1 ovs-appctl dpctl/flush-conntrack
 m_as ovn-chassis-2 ovs-appctl dpctl/flush-conntrack
+m_as ovn-chassis-3 ovs-appctl dpctl/flush-conntrack
+m_as ovn-chassis-4 ovs-appctl dpctl/flush-conntrack
 m_as ovn-gw-1 ovs-appctl dpctl/flush-conntrack
 m_as ovn-gw-2 ovs-appctl dpctl/flush-conntrack
 
@@ -1826,8 +1823,16 @@ AT_CHECK([echo -e $gw2_ct | grep "20.0.1.3" -c], [1], [dnl
 # Check the backend IP from ct entries on gw-1 (DGP public1)
 backend_check=$(echo -e $gw1_ct | grep "10.0.1.3,sport=59004,dport=80" -c)
 
+AT_CHECK([echo -e $backend_check && echo -e $chassis1_ct && echo -e $chassis2_ct && echo -e $gw1_ct  && echo -e $gw2_ct  ], [1], [dnl
+])
+
 if [[ $backend_check -gt 0 ]]; then
 # Backend resides on ovn-chassis-1
+AT_CHECK([echo -e $chassis1_ct | M_FORMAT_CT(20.0.1.3) | \
+grep tcp], [0], [dnl
+tcp,orig=(src=20.0.1.3,dst=10.0.1.3,sport=59004,dport=80),reply=(src=10.0.1.3,dst=20.0.1.3,sport=80,dport=59004),zone=<cleared>,protoinfo=(state=<cleared>)
+])
+
 # Ensure that the traffic only come from ovn-chassis-1
 AT_CHECK([echo -e $chassis2_ct | grep "20.0.1.3" | grep "dport=80" -c], [1], [dnl
 0
@@ -1837,6 +1842,11 @@ AT_CHECK([echo -e $chassis2_flow | grep "20.0.1.3" | grep "dport=80" -c], [1], [
 ])
 else
 # Backend resides on ovn-chassis-2
+AT_CHECK([echo -e $chassis2_ct | M_FORMAT_CT(20.0.1.3) | \
+grep tcp], [0], [dnl
+tcp,orig=(src=20.0.1.3,dst=10.0.1.4,sport=59004,dport=80),reply=(src=10.0.1.4,dst=20.0.1.3,sport=80,dport=59004),zone=<cleared>,protoinfo=(state=<cleared>)
+])
+
 # Ensure that the traffic only come from ovn-chassis-2
 AT_CHECK([echo -e $chassis1_ct | grep "20.0.1.3" | grep "dport=80" -c], [1], [dnl
 0
@@ -1849,6 +1859,8 @@ fi
 # Flush conntrack entries for easier output parsing of next test.
 m_as ovn-chassis-1 ovs-appctl dpctl/flush-conntrack
 m_as ovn-chassis-2 ovs-appctl dpctl/flush-conntrack
+m_as ovn-chassis-3 ovs-appctl dpctl/flush-conntrack
+m_as ovn-chassis-4 ovs-appctl dpctl/flush-conntrack
 m_as ovn-gw-1 ovs-appctl dpctl/flush-conntrack
 m_as ovn-gw-2 ovs-appctl dpctl/flush-conntrack
 
@@ -1905,6 +1917,8 @@ fi
 # Flush conntrack entries for easier output parsing of next test.
 m_as ovn-chassis-1 ovs-appctl dpctl/flush-conntrack
 m_as ovn-chassis-2 ovs-appctl dpctl/flush-conntrack
+m_as ovn-chassis-3 ovs-appctl dpctl/flush-conntrack
+m_as ovn-chassis-4 ovs-appctl dpctl/flush-conntrack
 m_as ovn-gw-1 ovs-appctl dpctl/flush-conntrack
 m_as ovn-gw-2 ovs-appctl dpctl/flush-conntrack
 
@@ -1940,6 +1954,11 @@ backend_check=$(echo -e $gw2_ct | grep "10.0.1.3,sport=59006,dport=80" -c)
 
 if [[ $backend_check -gt 0 ]]; then
 # Backend resides on ovn-chassis-1
+AT_CHECK([echo -e $chassis1_ct | M_FORMAT_CT(30.0.1.3) | \
+grep tcp], [0], [dnl
+tcp,orig=(src=30.0.1.3,dst=10.0.1.3,sport=59006,dport=80),reply=(src=10.0.1.3,dst=30.0.1.3,sport=80,dport=59006),zone=<cleared>,protoinfo=(state=<cleared>)
+])
+
 # Ensure that the traffic only come from ovn-chassis-1
 AT_CHECK([echo -e $chassis2_ct | grep "30.0.1.3" | grep "dport=80" -c], [1], [dnl
 0
@@ -1949,6 +1968,11 @@ AT_CHECK([echo -e $chassis2_flow | grep "30.0.1.3" | grep "dport=80" -c], [1], [
 ])
 else
 # Backend resides on ovn-chassis-2
+AT_CHECK([echo -e $chassis2_ct | M_FORMAT_CT(30.0.1.3) | \
+grep tcp], [0], [dnl
+tcp,orig=(src=30.0.1.3,dst=10.0.1.4,sport=59006,dport=80),reply=(src=10.0.1.4,dst=30.0.1.3,sport=80,dport=59006),zone=<cleared>,protoinfo=(state=<cleared>)
+])
+
 # Ensure that the traffic only come from ovn-chassis-2
 AT_CHECK([echo -e $chassis1_ct | grep "30.0.1.3" | grep "dport=80" -c], [1], [dnl
 0
@@ -1961,6 +1985,8 @@ fi
 # Flush conntrack entries for easier output parsing of next test.
 m_as ovn-chassis-1 ovs-appctl dpctl/flush-conntrack
 m_as ovn-chassis-2 ovs-appctl dpctl/flush-conntrack
+m_as ovn-chassis-3 ovs-appctl dpctl/flush-conntrack
+m_as ovn-chassis-4 ovs-appctl dpctl/flush-conntrack
 m_as ovn-gw-1 ovs-appctl dpctl/flush-conntrack
 m_as ovn-gw-2 ovs-appctl dpctl/flush-conntrack
 
@@ -1996,6 +2022,11 @@ backend_check=$(echo -e $gw2_ct | grep "10.0.1.3,sport=59007,dport=80" -c)
 
 if [[ $backend_check -gt 0 ]]; then
 # Backend resides on ovn-chassis-1
+AT_CHECK([echo -e $chassis1_ct | M_FORMAT_CT(30.0.1.3) | \
+grep tcp], [0], [dnl
+tcp,orig=(src=30.0.1.3,dst=10.0.1.3,sport=59007,dport=80),reply=(src=10.0.1.3,dst=30.0.1.3,sport=80,dport=59007),zone=<cleared>,protoinfo=(state=<cleared>)
+])
+
 # Ensure that the traffic only come from ovn-chassis-1
 AT_CHECK([echo -e $chassis2_ct | grep "30.0.1.3" | grep "dport=80" -c], [1], [dnl
 0
@@ -2005,6 +2036,11 @@ AT_CHECK([echo -e $chassis2_flow | grep "30.0.1.3" | grep "dport=80" -c], [1], [
 ])
 else
 # Backend resides on ovn-chassis-2
+AT_CHECK([echo -e $chassis2_ct | M_FORMAT_CT(30.0.1.3) | \
+grep tcp], [0], [dnl
+tcp,orig=(src=30.0.1.3,dst=10.0.1.4,sport=59007,dport=80),reply=(src=10.0.1.4,dst=30.0.1.3,sport=80,dport=59007),zone=<cleared>,protoinfo=(state=<cleared>)
+])
+
 # Ensure that the traffic only come from ovn-chassis-2
 AT_CHECK([echo -e $chassis1_ct | grep "30.0.1.3" | grep "dport=80" -c], [1], [dnl
 0
@@ -2129,10 +2165,6 @@ done
 
 
 # Delete already used ovs-ports
-m_as ovn-chassis-1 ovs-vsctl del-port br-int sw0p1-p
-m_as ovn-chassis-2 ovs-vsctl del-port br-int sw0p2-p
-m_as ovn-chassis-2 ovs-vsctl del-port br-int sw1p1-p
-m_as ovn-chassis-3 ovs-vsctl del-port br-int sw1p1-p
 m_as ovn-chassis-1 ip link del sw0p1-p
 m_as ovn-chassis-2 ip link del sw0p2-p
 m_as ovn-chassis-2 ip link del sw1p1-p
