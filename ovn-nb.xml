@@ -2930,6 +2930,28 @@ or
         option is not present the limit is not set and the zone limit is
         derived from OvS default datapath limit.
       </column>
+
+      <column name="options" key="ic-route-filter-adv">
+        <p>
+          This option expects list of CIDRs delimited by "," that's present
+          in the Logical Router. A route will not be advertised if the
+          route's prefix belongs to any of the CIDRs listed.
+
+          This allows to filter CIDR prefixes in the process of advertising
+          routes in <code>ovn-ic</code> daemon.
+        </p>
+      </column>
+
+      <column name="options" key="ic-route-filter-learn">
+        <p>
+          This option expects list of CIDRs delimited by "," that's present
+          in the Logical Router. A route will not be learned if the
+          route's prefix belongs to any of the CIDRs listed.
+
+          This allows to filter CIDR prefixes in the process of learning
+          routes in <code>ovn-ic</code> daemon.
+        </p>
+      </column>
     </group>
 
     <group title="Common Columns">
@@ -3662,6 +3684,29 @@ or
 
         </ul>
       </column>
+
+      <column name="options" key="ic-route-filter-adv">
+        <p>
+          This option expects list of CIDRs delimited by "," that's present
+          in the Logical Router Port. A route will not be advertised if the
+          route's prefix belongs to any of the CIDRs listed.
+
+          This allows to filter CIDR prefixes in the process of advertising
+          routes in <code>ovn-ic</code> daemon.
+        </p>
+      </column>
+
+      <column name="options" key="ic-route-filter-learn">
+        <p>
+          This option expects list of CIDRs delimited by "," that's present
+          in the Logical Router Port. A route will not be learned if the
+          route's prefix belongs to any of the CIDRs listed.
+
+          This allows to filter CIDR prefixes in the process of learning
+          routes in <code>ovn-ic</code> daemon.
+        </p>
+      </column>
+
     </group>
 
     <group title="Attachment">
